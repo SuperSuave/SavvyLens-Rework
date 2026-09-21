@@ -17,6 +17,7 @@ import { CanBridgeView } from './components/CanBridgeView';
 import { ConnectionsView } from './components/ConnectionsView';
 import { ConnectionModal } from './components/ConnectionModal';
 import { ImportModal } from './components/ImportModal';
+import { MobileCompanionView } from './components/MobileCompanionView';
 import { PlaybackStatusBar } from './components/PlaybackStatusBar';
 import { INITIAL_CONNECTIONS, INITIAL_DBC_MESSAGES, generateInitialCANFrames } from './data/mockData';
 import { CANFrame, ConnectionConfig, DBCMessage, ScriptItem, Bookmark, CANMessageTrigger } from './types';
@@ -687,6 +688,22 @@ export default function App() {
         <NavigationRail activeTab={activeTab} setActiveTab={setActiveTab} />
 
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          {activeTab === 'mobile-companion' && (
+            <MobileCompanionView
+              frames={frames}
+              connections={connections}
+              bookmarks={bookmarks}
+              dbcMessages={dbcMessages}
+              canTriggers={canTriggers}
+              isCapturing={isCapturing}
+              setIsCapturing={setIsCapturing}
+              handleClearFrames={handleClearFrames}
+              handleConnectDevice={handleConnectDevice}
+              handleSendCustomFrame={handleSendCustomFrame}
+              handleCreateBookmark={handleCreateBookmark}
+              showToast={showToast}
+            />
+          )}
           {activeTab === 'sniffer' && (
             <LiveSnifferView
               frames={frames}

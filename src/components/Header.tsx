@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, Radio, Download, Upload, Settings, Play, Pause, RefreshCw, Cpu } from 'lucide-react';
+import { Activity, Radio, Download, Upload, Settings, Play, Pause, RefreshCw, Cpu, Smartphone } from 'lucide-react';
 import { ConnectionConfig } from '../types';
 import { SavvyLensLogo } from './SavvyLensLogo';
 
@@ -134,6 +134,19 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <Upload className="w-3.5 h-3.5 text-blue-100" />
           <span className="font-medium">Import</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('mobile-companion')}
+          title="Switch to Mobile Companion View (Android / Touch Optimized)"
+          className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition ${
+            activeTab === 'mobile-companion'
+              ? 'bg-indigo-600 text-white border-indigo-500 shadow'
+              : 'bg-slate-800 hover:bg-slate-700 text-indigo-300 border-slate-700'
+          }`}
+        >
+          <Smartphone className="w-3.5 h-3.5" />
+          <span className="hidden md:inline">Mobile Mode</span>
         </button>
       </div>
     </header>
