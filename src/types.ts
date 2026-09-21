@@ -20,14 +20,15 @@ export interface DBCSignal {
   name: string;
   startBit: number;
   length: number;
-  isBigEndian: boolean;
+  isBigEndian?: boolean;
+  isLittleEndian?: boolean;
   isSigned: boolean;
   factor: number;
   offset: number;
   min: number;
   max: number;
   unit: string;
-  receiver: string[];
+  receiver?: string[];
 }
 
 export interface DBCMessage {
@@ -84,7 +85,8 @@ export interface ScriptItem {
   id: string;
   name: string;
   code: string;
-  active: boolean;
+  active?: boolean;
+  enabled?: boolean;
   description: string;
 }
 
@@ -151,4 +153,73 @@ export interface BisectorStep {
   hypothesis: string;
   remainingCandidates: number;
   status: 'Pending' | 'Confirmed' | 'Eliminated';
+}
+
+export interface BaselineState {
+  canId: string;
+  baselineData: number[];
+  varianceMask: number[];
+  capturedAt: number;
+}
+
+export interface ValueCorrelationMatch {
+  canId: string;
+  byteIndex: number;
+  byteValue: number;
+  timestamp: number;
+  timeDeltaMs: number;
+  isExactValueMatch: boolean;
+  isTransitionMatch: boolean;
+  score: number;
+  frameName?: string;
+  candidateRole: 'state' | 'echo';
+}
+
+export interface OfflineBaselineAnalysisResult {
+  baselineRange: {
+    startTime: number;
+    endTime: number;
+    startFrameIndex: number;
+    endFrameIndex: number;
+    frameCount: number;
+  };
+  eventRange: {
+    startTime: number;
+    endTime: number;
+    startFrameIndex: number;
+    endFrameIndex: number;
+    frameCount: number;
+  };
+  pulses: Array<{
+    frameIndex: number;
+    timestamp: number;
+    canId: string;
+    byteIndex: number;
+    baselineValue: number;
+    spikedValue: number;
+    returnedValue: number;
+    bitMask: number;
+    durationMs: number;
+    name?: string;
+  }>;
+  stateShifts: Array<{
+    canId: string;
+    byteIndex: number;
+    fromValue: number;
+    toValue: number;
+    firstTransitionTime: number;
+    frameIndex: number;
+    name?: string;
+  }>;
+  newEventIds: Array<{
+    canId: string;
+    count: number;
+    firstSeenTime: number;
+    name?: string;
+  }>;
+  maskedCounterBytes: Array<{
+    canId: string;
+    byteIndex: number;
+    pattern: string;
+  }>;
 }

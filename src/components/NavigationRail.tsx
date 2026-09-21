@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { 
   Layers, Database, LineChart, Send, Code, Cpu, Shield, Zap, 
-  GitBranch, GitCompare, Bookmark, Network, ChevronLeft, ChevronRight, Activity, Wifi 
+  GitBranch, GitCompare, Bookmark, Network, ChevronLeft, ChevronRight, Activity, Wifi, Film
 } from 'lucide-react';
 import { SavvyLensLogo } from './SavvyLensLogo';
 
@@ -19,7 +19,8 @@ export const NavigationRail: React.FC<NavigationRailProps> = ({
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
 
   const tabs = [
-    { id: 'sniffer', label: 'Live Sniffer', icon: Layers, description: 'Real-time CAN frame grid & sniffer' },
+    { id: 'sniffer', label: 'Live Sniffer', icon: Layers, description: 'Real-time CAN frame grid & baseline latch' },
+    { id: 'playback', label: 'Log Baseline & Replay', icon: Film, description: 'Offline relative & range baseline analysis' },
     { id: 'dbc', label: 'DBC Manager', icon: Database, description: 'Signal decoders & message database' },
     { id: 'uds', label: 'UDS Scanner', icon: Shield, description: 'Diagnostic services & ECU discovery' },
     { id: 'isotp', label: 'ISO-TP Decoder', icon: Layers, description: 'Multi-frame packet reassembly' },

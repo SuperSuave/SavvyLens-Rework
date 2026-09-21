@@ -8,6 +8,7 @@ import { SenderView } from './components/SenderView';
 import { ScriptingView } from './components/ScriptingView';
 import { UDSScannerView } from './components/UDSScannerView';
 import { ISOTPDecoderView } from './components/ISOTPDecoderView';
+import { PlaybackView } from './components/PlaybackView';
 import { FuzzingView } from './components/FuzzingView';
 import { BisectorView } from './components/BisectorView';
 import { FileComparatorView } from './components/FileComparatorView';
@@ -569,6 +570,9 @@ export default function App() {
               isCapturing={isCapturing}
               onToggleCapture={() => setIsCapturing(prev => !prev)}
             />
+          )}
+          {activeTab === 'playback' && (
+            <PlaybackView frames={frames} />
           )}
           {activeTab === 'dbc' && (
             <DBCManagerView

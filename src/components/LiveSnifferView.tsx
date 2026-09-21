@@ -14,6 +14,8 @@ import {
   CorrelatedEvent,
   InferredSignalType 
 } from '../utils/signalAnalysis';
+import { ValueCorrelationModal } from './ValueCorrelationModal';
+import { describeBitDifference } from '../utils/baselineAnalysis';
 
 export interface MessageStateItem {
   frame: CANFrame;
@@ -46,7 +48,7 @@ interface LiveSnifferViewProps {
   onToggleCapture?: () => void;
 }
 
-type FilterMode = 'all' | 'changed' | 'new_ids' | 'rx' | 'tx';
+type FilterMode = 'all' | 'changed' | 'diverged' | 'new_ids' | 'rx' | 'tx';
 type InspectorTab = 'states' | 'matrix' | 'signal_types' | 'correlations';
 
 export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
@@ -73,6 +75,142 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
   const [mapByteChoice, setMapByteChoice] = useState<number>(1); // D1 - D8
   const [mapTriggerName, setMapTriggerName] = useState('');
 
+  // SavvyLens Baseline & Latched Pulse Detection State
+  const [baselineActive, setBaselineActive] = useState<boolean>(false);
+  const [baselineMap, setBaselineMap] = useState<Map<string, { baselineData: number[]; varianceMask: number[] }>>(new Map());
+  const [latchedPulses, setLatchedPulses] = useState<Map<string, {
+    canId: string;
+    byteIndex: number;
+    baselineVal: number;
+    peakVal: number;
+    currentVal: number;
+    timestamp: number;
+    bitMask: number;
+  }>>(new Map());
+  const [latchDurationSec, setLatchDurationSec] = useState<number>(10); // 10s default
+
+  // Value Correlation Modal State
+  const [correlatorOpen, setCorrelatorOpen] = useState<boolean>(false);
+  const [correlatorFrame, setCorrelatorFrame] = useState<CANFrame | null>(null);
+  const [correlatorByteIdx, setCorrelatorByteIdx] = useState<number>(0);
+
+  // Capture current frames as baseline
+  const handleCaptureBaseline = () => {
+    const map = new Map<string, { baselineData: number[]; varianceMask: number[] }>();
+    frames.forEach(f => {
+      const existing = map.get(f.id);
+      if (!existing) {
+        map.set(f.id, {
+          baselineData: [...f.data],
+          varianceMask: new Array(f.data.length).fill(0)
+        });
+      } else {
+        f.data.forEach((b, idx) => {
+          existing.varianceMask[idx] = existing.varianceMask[idx] | (existing.baselineData[idx] ^ b);
+        });
+      }
+    });
+    setBaselineMap(map);
+    setBaselineActive(true);
+    setLatchedPulses(new Map());
+  };
+
+  const handleClearBaseline = () => {
+    setBaselineActive(false);
+    setBaselineMap(new Map());
+    setLatchedPulses(new Map());
+  };
+
+  // E-GMP Test Workflow 1: Simulate Steering Wheel Button Pulse (00 -> 40 -> 00)
+  const handleSimulateEgmpButtonPulse = () => {
+    // Step 1: Active button press (Byte D4 = 0x40)
+    onSendCustomFrame("0x180", [0x10, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x0F]);
+    // Step 2: Released 150ms later (Byte D4 returns to 0x00)
+    setTimeout(() => {
+      onSendCustomFrame("0x180", [0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
+    }, 150);
+  };
+
+  // E-GMP Test Workflow 2: Simulate HVAC Command (06/06) & State Echo (06)
+  const handleSimulateEgmpHvacCommand = () => {
+    // Command on 0x320 with Byte D4/D5 = 0x06
+    onSendCustomFrame("0x320", [0x01, 0x00, 0x00, 0x06, 0x06, 0x00, 0x00, 0x22]);
+    // State update on 0x485 with Byte D2 = 0x06 arriving 45ms later
+    setTimeout(() => {
+      onSendCustomFrame("0x485", [0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05]);
+    }, 45);
+  };
+
+  // Live Pulse Tracking when Baseline is Active
+  React.useEffect(() => {
+    if (!baselineActive || frames.length === 0) return;
+    const latestFrame = frames[frames.length - 1];
+    if (!latestFrame) return;
+
+    const base = baselineMap.get(latestFrame.id);
+    if (!base) return;
+
+    const now = Date.now();
+
+    latestFrame.data.forEach((b, idx) => {
+      const baseVal = base.baselineData[idx] ?? 0;
+      const mask = base.varianceMask[idx] ?? 0;
+      // Skip cycling alive counter bits
+      const isPureCounter = (mask & 0x0F) === 0x0F && (mask & 0xF0) === 0;
+      const isDiff = isPureCounter ? (b & 0xF0) !== (baseVal & 0xF0) : b !== baseVal;
+
+      const pulseKey = `${latestFrame.id}_D${idx}`;
+
+      if (isDiff) {
+        setLatchedPulses(prev => {
+          const next = new Map(prev);
+          const existing = next.get(pulseKey);
+          const peakVal = existing ? (Math.abs(b - baseVal) > Math.abs(existing.peakVal - baseVal) ? b : existing.peakVal) : b;
+          next.set(pulseKey, {
+            canId: latestFrame.id,
+            byteIndex: idx,
+            baselineVal: baseVal,
+            peakVal,
+            currentVal: b,
+            timestamp: now,
+            bitMask: peakVal ^ baseVal
+          });
+          return next;
+        });
+      } else {
+        // Returned to baseline value
+        setLatchedPulses(prev => {
+          const existing = prev.get(pulseKey);
+          if (existing && existing.currentVal !== baseVal) {
+            const next = new Map(prev);
+            next.set(pulseKey, {
+              ...existing,
+              currentVal: baseVal,
+              timestamp: now
+            });
+            return next;
+          }
+          return prev;
+        });
+      }
+    });
+
+    // Cleanup expired pulses if latch duration is set
+    if (latchDurationSec > 0) {
+      setLatchedPulses(prev => {
+        let changed = false;
+        const next = new Map(prev);
+        next.forEach((p, key) => {
+          if (now - p.timestamp > latchDurationSec * 1000) {
+            next.delete(key);
+            changed = true;
+          }
+        });
+        return changed ? next : prev;
+      });
+    }
+  }, [frames, baselineActive, baselineMap, latchDurationSec]);
+
   // Synchronize if initialSearchTerm updates
   React.useEffect(() => {
     if (initialSearchTerm) {
@@ -87,6 +225,17 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
       if (filterMode === 'changed') {
         const hasChanges = frame.changedBytes?.some(c => c);
         if (!hasChanges) return false;
+      } else if (filterMode === 'diverged') {
+        const hasPulse = Array.from(latchedPulses.values()).some(p => p.canId.toLowerCase() === frame.id.toLowerCase());
+        const base = baselineMap.get(frame.id);
+        const isDiverged = base && frame.data.some((b, idx) => {
+          const m = base.varianceMask[idx] ?? 0;
+          if ((m & 0x0F) === 0x0F && (m & 0xF0) === 0) {
+            return (b & 0xF0) !== (base.baselineData[idx] & 0xF0);
+          }
+          return b !== base.baselineData[idx];
+        });
+        if (!hasPulse && !isDiverged) return false;
       } else if (filterMode === 'new_ids') {
         if (!frame.isNewId) return false;
       } else if (filterMode === 'rx') {
@@ -319,6 +468,18 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
               RX
             </button>
             <button
+              onClick={() => setFilterMode('diverged')}
+              title="SavvyLens: Show only CAN IDs with active pulses or baseline divergence"
+              className={`px-2.5 py-1 rounded-lg font-medium flex items-center space-x-1 transition ${
+                filterMode === 'diverged' 
+                  ? 'bg-rose-600 text-white shadow-xs' 
+                  : 'text-slate-400 hover:text-rose-300'
+              }`}
+            >
+              <Zap className="w-3 h-3" />
+              <span>Pulses / Diverged</span>
+            </button>
+            <button
               onClick={() => setFilterMode('tx')}
               className={`px-2 py-1 rounded-lg font-medium transition ${
                 filterMode === 'tx' 
@@ -364,6 +525,83 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
             >
               <Trash2 className="w-3.5 h-3.5 text-rose-400" />
               <span className="hidden sm:inline">Clear</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Baseline Latch & E-GMP Simulation Bar */}
+        <div className="px-3 py-2 bg-slate-950/90 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex items-center space-x-2">
+            <span className="text-slate-400 font-semibold flex items-center space-x-1">
+              <Shield className="w-3.5 h-3.5 text-blue-400" />
+              <span>Baseline Latch:</span>
+            </span>
+
+            {!baselineActive ? (
+              <button
+                onClick={handleCaptureBaseline}
+                className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold flex items-center space-x-1.5 shadow-xs transition"
+                title="Lock current frame payloads as steady-state baseline and latch momentary pulses"
+              >
+                <Zap className="w-3 h-3 text-amber-300" />
+                <span>Capture Baseline</span>
+              </button>
+            ) : (
+              <div className="flex items-center space-x-2">
+                <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono font-bold flex items-center space-x-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>Locked ({baselineMap.size} IDs)</span>
+                </span>
+                <button
+                  onClick={handleClearBaseline}
+                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium transition"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
+
+            {/* Latch Duration Selector */}
+            <div className="flex items-center space-x-1 bg-slate-900 border border-slate-800 px-2 py-0.5 rounded-lg text-slate-300 font-mono text-[11px]">
+              <span className="text-slate-500 font-sans">Hold:</span>
+              <select
+                value={latchDurationSec}
+                onChange={e => setLatchDurationSec(Number(e.target.value))}
+                className="bg-transparent text-white focus:outline-hidden cursor-pointer"
+              >
+                <option value={5} className="bg-slate-900">5s</option>
+                <option value={10} className="bg-slate-900">10s</option>
+                <option value={30} className="bg-slate-900">30s</option>
+                <option value={0} className="bg-slate-900">Infinite</option>
+              </select>
+            </div>
+
+            {latchedPulses.size > 0 && (
+              <span className="text-amber-400 font-bold bg-amber-950/60 border border-amber-800/40 px-2 py-0.5 rounded text-[11px] font-mono">
+                {latchedPulses.size} Latched Pulse{latchedPulses.size > 1 ? 's' : ''} (Click byte to correlate)
+              </span>
+            )}
+          </div>
+
+          {/* Quick Simulation Triggers for User Workflows */}
+          <div className="flex items-center space-x-2">
+            <span className="text-[11px] text-slate-500 font-medium">E-GMP Test Injections:</span>
+            <button
+              onClick={handleSimulateEgmpButtonPulse}
+              className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-amber-500/60 text-amber-300 rounded-lg font-mono text-[11px] transition flex items-center space-x-1"
+              title="Inject 0x180 Byte D4: 00 -> 40 -> 00 (Momentary steering button pulse)"
+            >
+              <Zap className="w-3 h-3 text-amber-400" />
+              <span>Simulate Pulse (00➔40➔00)</span>
+            </button>
+
+            <button
+              onClick={handleSimulateEgmpHvacCommand}
+              className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-blue-500/60 text-blue-300 rounded-lg font-mono text-[11px] transition flex items-center space-x-1"
+              title="Inject 0x320 Cmd (06/06) & 0x485 State (06) echo 45ms later"
+            >
+              <GitMerge className="w-3 h-3 text-blue-400" />
+              <span>Simulate HVAC (Cmd➔Echo)</span>
             </button>
           </div>
         </div>
@@ -429,25 +667,56 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
                       <td className="py-2 px-3 text-slate-200 font-sans font-medium">{frame.name || 'Unknown'}</td>
                       <td className="py-2 px-3 text-slate-400">{frame.dlc}</td>
 
-                      {/* SavvyLens Byte D1-D8 & Bit Change Highlighting */}
+                      {/* SavvyLens Byte D1-D8 & Bit Change Highlighting & Latched Pulses */}
                       <td className="py-2 px-3 tracking-wider">
-                        <div className="flex items-center space-x-1 font-mono">
+                        <div className="flex items-center space-x-1.5 font-mono">
                           {frame.data.map((byte, bIdx) => {
                             const isChanged = highlightChanges && frame.changedBytes?.[bIdx];
                             const hexStr = byte.toString(16).toUpperCase().padStart(2, '0');
+                            const pulse = latchedPulses.get(`${frame.id}_D${bIdx}`);
+                            const base = baselineMap.get(frame.id);
+                            const baseVal = base?.baselineData[bIdx];
+                            const isDeviating = baselineActive && baseVal !== undefined && baseVal !== byte;
+
                             return (
-                              <span
+                              <div
                                 key={bIdx}
-                                title={isChanged ? `Byte D${bIdx + 1} changed! Prev: 0x${(frame.prevData?.[bIdx] ?? byte).toString(16).toUpperCase().padStart(2, '0')}` : `Byte D${bIdx + 1}: 0x${hexStr}`}
-                                className={`px-1.5 py-0.5 rounded transition inline-flex flex-col items-center ${
-                                  isChanged
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setCorrelatorFrame(frame);
+                                  setCorrelatorByteIdx(bIdx);
+                                  setCorrelatorOpen(true);
+                                }}
+                                title={
+                                  pulse 
+                                    ? `Latched Pulse: Base 0x${pulse.baselineVal.toString(16).padStart(2, '0')} ➔ Peak 0x${pulse.peakVal.toString(16).padStart(2, '0')} ➔ Cur 0x${pulse.currentVal.toString(16).padStart(2, '0')} (${describeBitDifference(pulse.baselineVal, pulse.peakVal)})\nClick to correlate with state echo`
+                                    : isChanged 
+                                    ? `Byte D${bIdx + 1} changed! Prev: 0x${(frame.prevData?.[bIdx] ?? byte).toString(16).toUpperCase().padStart(2, '0')}\nClick to find command/state echoes` 
+                                    : `Byte D${bIdx + 1}: 0x${hexStr}\nClick to find command/state echoes`
+                                }
+                                className={`px-1.5 py-0.5 rounded transition inline-flex flex-col items-center cursor-pointer relative group ${
+                                  pulse
+                                    ? 'bg-amber-500/30 text-amber-200 font-bold border border-amber-500/80 shadow-xs ring-1 ring-amber-500/40'
+                                    : isDeviating
+                                    ? 'bg-rose-500/25 text-rose-200 font-bold border border-rose-500/50'
+                                    : isChanged
                                     ? 'bg-amber-500/25 text-amber-300 font-bold border border-amber-500/40 shadow-xs'
-                                    : 'text-slate-300 bg-slate-950/40 border border-slate-800/40'
+                                    : 'text-slate-300 bg-slate-950/40 border border-slate-800/40 hover:border-blue-500/50 hover:text-white'
                                 }`}
                               >
-                                <span className="text-[8px] text-slate-500 font-sans leading-none pb-0.5 select-none">D{bIdx + 1}</span>
+                                <div className="flex items-center space-x-1">
+                                  <span className="text-[8px] text-slate-500 font-sans leading-none pb-0.5 select-none">D{bIdx + 1}</span>
+                                  {pulse && (
+                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping inline-block" />
+                                  )}
+                                </div>
                                 <span className="leading-none text-[11px]">{hexStr}</span>
-                              </span>
+                                {pulse && (
+                                  <span className="text-[8px] text-amber-300 font-bold leading-none mt-0.5">
+                                    Δ{pulse.peakVal.toString(16).toUpperCase().padStart(2, '0')}
+                                  </span>
+                                )}
+                              </div>
                             );
                           })}
                         </div>
@@ -1393,6 +1662,17 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
             </button>
           </div>
         </div>
+      )}
+
+      {/* Value Echo & Command ↔ State Correlation Modal */}
+      {correlatorFrame && (
+        <ValueCorrelationModal
+          isOpen={correlatorOpen}
+          onClose={() => setCorrelatorOpen(false)}
+          commandFrame={correlatorFrame}
+          commandByteIdx={correlatorByteIdx}
+          allFrames={frames}
+        />
       )}
     </div>
   );
