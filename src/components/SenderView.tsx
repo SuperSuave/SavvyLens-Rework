@@ -61,14 +61,30 @@ export const SenderView: React.FC<SenderViewProps> = ({ onSendFrame }) => {
             </div>
 
             <div>
-              <label className="block text-xs text-slate-400 mb-1">Data Bytes (Hex separated by comma)</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs text-slate-400">Data Bytes (D1–D8, Hex separated by comma)</label>
+                <span className="text-[10px] text-slate-500 font-mono">D1 through D8</span>
+              </div>
               <input
                 type="text"
                 value={dataBytes}
                 onChange={e => setDataBytes(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono"
-                placeholder="00, 00, 00, 00, 00, 00, 00, 00"
+                placeholder="01, 02, 03, 04, 05, 06, 07, 08"
               />
+              {/* D1-D8 Byte Visualizer */}
+              <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5 mt-2">
+                {Array.from({ length: dlc }).map((_, idx) => {
+                  const parts = dataBytes.split(',').map(s => s.trim());
+                  const val = parts[idx] || '00';
+                  return (
+                    <div key={idx} className="bg-slate-950 p-1.5 rounded-lg border border-slate-800 text-center font-mono">
+                      <span className="text-[9px] text-slate-500 block">D{idx + 1}</span>
+                      <span className="text-xs font-bold text-blue-400">0x{val.padStart(2, '0').toUpperCase()}</span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
 
             <div>

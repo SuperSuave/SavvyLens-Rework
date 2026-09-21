@@ -79,19 +79,23 @@ export const Header: React.FC<HeaderProps> = ({
         </button>
 
         <button
+          id="header-export-button"
           onClick={onExportLogs}
-          title="Export CAN Log"
-          className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg border border-slate-700 transition"
+          title="Export CAN Log to CSV"
+          className="flex items-center space-x-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-slate-700 text-xs font-medium transition active:scale-95 cursor-pointer"
         >
-          <Download className="w-4 h-4" />
+          <Download className="w-3.5 h-3.5 text-slate-300" />
+          <span className="hidden sm:inline">Export</span>
         </button>
 
         <button
+          id="header-import-button"
           onClick={onImportLogs}
-          title="Import CAN Log / DBC"
-          className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg border border-slate-700 transition"
+          title="Import CAN Trace Logs (.csv, .trc, .log, .asc) or DBC Database"
+          className="flex items-center space-x-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white rounded-lg text-xs font-semibold border border-blue-500/80 shadow-sm shadow-blue-900/30 hover:shadow-blue-500/20 transition-all duration-150 active:scale-95 cursor-pointer select-none"
         >
-          <Upload className="w-4 h-4" />
+          <Upload className="w-3.5 h-3.5 text-blue-100" />
+          <span className="font-medium">Import</span>
         </button>
       </div>
     </header>

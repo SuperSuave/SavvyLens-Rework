@@ -141,7 +141,7 @@ export function analyzeFrameSignals(allFramesForId: CANFrame[], targetFrame: CAN
         byteIndex: bIdx,
         inferredType: 'Checksum / CRC',
         confidence: 88,
-        explanation: `High variance pseudo-random distribution located at payload boundary (Byte ${bIdx}). Typical AUTOSAR CRC-8 / checksum.`,
+        explanation: `High variance pseudo-random distribution located at payload boundary (Byte D${bIdx + 1}). Typical AUTOSAR CRC-8 / checksum.`,
         uniqueValuesCount: uniqueCount,
         min: minVal,
         max: maxVal,

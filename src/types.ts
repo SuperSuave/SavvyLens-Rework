@@ -88,6 +88,21 @@ export interface ScriptItem {
   description: string;
 }
 
+export interface CANMessageTrigger {
+  id: string;
+  name: string; // e.g. "Steering Wheel Button", "Cruise Set Switch"
+  enabled: boolean;
+  canId: string; // Hex string e.g. "0x156" or "156"
+  targetByte: number; // 1 to 8 for D1 to D8, or 0 for "Any Byte"
+  condition: 'equals' | 'mask_set' | 'changed' | 'any_message';
+  expectedHex: string; // e.g. "01" or "0x24"
+  maskHex?: string; // e.g. "FF" or "01"
+  autoDisableOnTrigger?: boolean;
+  cooldownMs?: number; // debounce window (ms)
+  lastTriggeredTimestamp?: number;
+  notes?: string;
+}
+
 export interface Bookmark {
   id: string;
   timestamp: number;
@@ -97,7 +112,11 @@ export interface Bookmark {
   newIdsDetected: string[]; // SavvyLens: CAN IDs recorded at the same time as bookmark
   changedIdsDetected?: string[]; // IDs whose payload changed within the delta window
   deltaWindowMs: number; // e.g. 250ms, 500ms
-  triggerMode: 'Manual' | 'Shortcut' | 'Auto-Armed';
+  triggerMode: 'Manual' | 'Shortcut' | 'Auto-Armed' | 'CAN-Triggered';
+  matchedTriggerName?: string;
+  matchedCanId?: string;
+  matchedByteLabel?: string; // e.g. "Byte D1 == 0x24"
+  matchedPayload?: string;
 }
 
 export interface UDSScanResult {

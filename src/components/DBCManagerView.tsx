@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
-import { Database, Plus, Edit3, Trash2, Layers, CheckCircle } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import { Database, Plus, Edit3, Trash2, Layers, CheckCircle, Upload } from 'lucide-react';
 import { DBCMessage, DBCSignal } from '../types';
+import { parseDbcContent } from '../utils/logParser';
 
 interface DBCManagerViewProps {
   dbcMessages: DBCMessage[];
@@ -12,6 +13,31 @@ export const DBCManagerView: React.FC<DBCManagerViewProps> = ({ dbcMessages, set
   const [newMsgName, setNewMsgName] = useState('');
   const [newMsgId, setNewMsgId] = useState('');
   const [newMsgSender, setNewMsgSender] = useState('');
+  const dbcFileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleDbcFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const text = ev.target?.result as string;
+        const parsed = parseDbcContent(text);
+        if (parsed.length === 0) {
+          alert('No valid BO_ or SG_ message definitions found in DBC file.');
+          return;
+        }
+        setDbcMessages(prev => {
+          const newIds = new Set(parsed.map(m => m.hexId.toLowerCase()));
+          return [...parsed, ...prev.filter(m => !newIds.has(m.hexId.toLowerCase()))];
+        });
+        setSelectedMsgIndex(0);
+      } catch (err: any) {
+        alert(err.message || 'Failed to parse DBC file.');
+      }
+    };
+    reader.readAsText(file);
+  };
 
   const currentMsg = dbcMessages[selectedMsgIndex];
 
@@ -47,9 +73,26 @@ export const DBCManagerView: React.FC<DBCManagerViewProps> = ({ dbcMessages, set
             <Database className="w-4 h-4 text-blue-400" />
             <h2 className="font-bold text-sm text-white">DBC Messages</h2>
           </div>
-          <span className="text-xs bg-blue-600/20 text-blue-400 px-2 py-0.5 rounded-full border border-blue-500/30">
-            {dbcMessages.length} Messages
-          </span>
+          <div className="flex items-center space-x-1.5">
+            <input 
+              ref={dbcFileInputRef}
+              type="file" 
+              accept=".dbc,.json" 
+              className="hidden" 
+              onChange={handleDbcFileUpload}
+            />
+            <button
+              onClick={() => dbcFileInputRef.current?.click()}
+              title="Import .dbc database"
+              className="flex items-center space-x-1 px-2 py-1 bg-slate-800 hover:bg-slate-700 text-blue-300 rounded-md border border-slate-700 text-[11px] font-semibold transition cursor-pointer"
+            >
+              <Upload className="w-3 h-3 text-blue-400" />
+              <span>Import</span>
+            </button>
+            <span className="text-xs bg-blue-600/20 text-blue-400 px-2 py-0.5 rounded-full border border-blue-500/30">
+              {dbcMessages.length}
+            </span>
+          </div>
         </div>
 
         <div className="flex-1 overflow-auto p-2 space-y-1">
@@ -130,14 +173,24 @@ export const DBCManagerView: React.FC<DBCManagerViewProps> = ({ dbcMessages, set
               </h3>
 
               <div className="space-y-3">
-                {currentMsg.signals.map((sig, idx) => (
-                  <div key={idx} className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="font-bold text-sm text-blue-300">{sig.name}</div>
-                      <div className="text-xs font-mono bg-slate-950 px-2 py-1 rounded border border-slate-800 text-slate-300">
-                        Bits: {sig.startBit} - {sig.startBit + sig.length - 1} ({sig.length} bits)
+                {currentMsg.signals.map((sig, idx) => {
+                  const startByte = Math.floor(sig.startBit / 8) + 1;
+                  const endByte = Math.floor((sig.startBit + sig.length - 1) / 8) + 1;
+                  const byteSpan = startByte === endByte ? `Byte D${startByte}` : `Bytes D${startByte}–D${endByte}`;
+
+                  return (
+                    <div key={idx} className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="font-bold text-sm text-blue-300">{sig.name}</div>
+                        <div className="flex items-center space-x-2">
+                          <span className="text-xs font-mono bg-blue-950/40 text-blue-300 px-2 py-0.5 rounded border border-blue-500/30 font-semibold">
+                            {byteSpan}
+                          </span>
+                          <span className="text-xs font-mono bg-slate-950 px-2 py-0.5 rounded border border-slate-800 text-slate-300">
+                            Bits: {sig.startBit} - {sig.startBit + sig.length - 1} ({sig.length} bits)
+                          </span>
+                        </div>
                       </div>
-                    </div>
 
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
                       <div className="bg-slate-950 p-2 rounded border border-slate-800/80">
@@ -158,7 +211,8 @@ export const DBCManagerView: React.FC<DBCManagerViewProps> = ({ dbcMessages, set
                       </div>
                     </div>
                   </div>
-                ))}
+                );
+              })}
               </div>
             </div>
           </div>

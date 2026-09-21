@@ -3,9 +3,10 @@ import {
   Search, Trash2, Filter, ArrowUpRight, ArrowDownLeft, 
   Shield, Eye, Zap, Bookmark as BookmarkIcon, Sparkles, SlidersHorizontal, 
   BrainCircuit, GitMerge, Clock, Activity, Info, ListFilter, Check, X,
-  Radio, Gauge, Hash, RefreshCw
+  Radio, Gauge, Hash, RefreshCw, History, ChevronLeft, ChevronRight,
+  Pause, Play, Table as TableIcon, Layers, ArrowRight, Maximize2, Minimize2
 } from 'lucide-react';
-import { CANFrame, DBCMessage } from '../types';
+import { CANFrame, DBCMessage, CANMessageTrigger } from '../types';
 import { 
   analyzeFrameSignals, 
   analyzeSurroundingCorrelations, 
@@ -14,6 +15,24 @@ import {
   InferredSignalType 
 } from '../utils/signalAnalysis';
 
+export interface MessageStateItem {
+  frame: CANFrame;
+  relativeOffset: number; // -5 to +5
+  deltaMs: number; // relative to selectedFrame
+  changedBytesFromSelected: boolean[];
+  changedBitsFromSelected: number[];
+  changedBytesFromPrior: boolean[];
+}
+
+export interface MessageStateHistory {
+  prevStates: MessageStateItem[];
+  currentState: MessageStateItem | null;
+  nextStates: MessageStateItem[];
+  totalOccurrences: number;
+  currentIndex: number;
+  allIdFrames: CANFrame[];
+}
+
 interface LiveSnifferViewProps {
   frames: CANFrame[];
   onClearFrames: () => void;
@@ -21,11 +40,14 @@ interface LiveSnifferViewProps {
   onSendCustomFrame: (id: string, data: number[]) => void;
   onQuickBookmark?: () => void;
   onBookmarkFromFrame?: (frame: CANFrame, correlatedIds: string[]) => void;
+  onAddCanTrigger?: (trigger: CANMessageTrigger) => void;
   initialSearchTerm?: string;
+  isCapturing?: boolean;
+  onToggleCapture?: () => void;
 }
 
 type FilterMode = 'all' | 'changed' | 'new_ids' | 'rx' | 'tx';
-type InspectorTab = 'matrix' | 'signal_types' | 'correlations';
+type InspectorTab = 'states' | 'matrix' | 'signal_types' | 'correlations';
 
 export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
   frames,
@@ -34,14 +56,22 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
   onSendCustomFrame,
   onQuickBookmark,
   onBookmarkFromFrame,
-  initialSearchTerm = ''
+  onAddCanTrigger,
+  initialSearchTerm = '',
+  isCapturing = true,
+  onToggleCapture
 }) => {
   const [searchTerm, setSearchTerm] = useState(initialSearchTerm);
   const [filterMode, setFilterMode] = useState<FilterMode>('all');
   const [highlightChanges, setHighlightChanges] = useState(true);
   const [selectedFrame, setSelectedFrame] = useState<CANFrame | null>(null);
-  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('matrix');
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('states');
+  const [stateViewMode, setStateViewMode] = useState<'timeline' | 'table'>('timeline');
+  const [isInspectorExpanded, setIsInspectorExpanded] = useState(false);
   const [correlationWindowMs, setCorrelationWindowMs] = useState<number>(500);
+  const [isMappingTrigger, setIsMappingTrigger] = useState(false);
+  const [mapByteChoice, setMapByteChoice] = useState<number>(1); // D1 - D8
+  const [mapTriggerName, setMapTriggerName] = useState('');
 
   // Synchronize if initialSearchTerm updates
   React.useEffect(() => {
@@ -112,6 +142,83 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
     if (!selectedFrame) return [];
     return analyzeSurroundingCorrelations(frames, selectedFrame, correlationWindowMs);
   }, [selectedFrame, frames, correlationWindowMs]);
+
+  // SavvyLens Previous 5 and Next 5 States Computation
+  const messageStates = useMemo<MessageStateHistory | null>(() => {
+    if (!selectedFrame) return null;
+
+    const allIdFrames = frames.filter(f => f.id.toLowerCase() === selectedFrame.id.toLowerCase());
+    if (allIdFrames.length === 0) return null;
+
+    let currIdx = allIdFrames.findIndex(f => f === selectedFrame);
+    if (currIdx === -1) {
+      currIdx = allIdFrames.findIndex(f => 
+        Math.abs(f.timestamp - selectedFrame.timestamp) < 0.0001 && f.count === selectedFrame.count
+      );
+    }
+    if (currIdx === -1) {
+      let minDiff = Infinity;
+      let closestIdx = 0;
+      allIdFrames.forEach((f, idx) => {
+        const diff = Math.abs(f.timestamp - selectedFrame.timestamp);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestIdx = idx;
+        }
+      });
+      currIdx = closestIdx;
+    }
+
+    const currentFrameObj = allIdFrames[currIdx];
+
+    const buildItem = (frame: CANFrame, relOffset: number, priorFrame?: CANFrame): MessageStateItem => {
+      const deltaMs = Number(((frame.timestamp - currentFrameObj.timestamp) * 1000).toFixed(1));
+      const changedBytesFromSelected = frame.data.map((b, i) => b !== (currentFrameObj.data[i] ?? 0));
+      const changedBitsFromSelected = frame.data.map((b, i) => (b ^ (currentFrameObj.data[i] ?? 0)) & 0xFF);
+      const changedBytesFromPrior = priorFrame
+        ? frame.data.map((b, i) => b !== (priorFrame.data[i] ?? 0))
+        : frame.data.map(() => false);
+
+      return {
+        frame,
+        relativeOffset: relOffset,
+        deltaMs,
+        changedBytesFromSelected,
+        changedBitsFromSelected,
+        changedBytesFromPrior
+      };
+    };
+
+    // Up to 5 previous frames
+    const startPrev = Math.max(0, currIdx - 5);
+    const rawPrev = allIdFrames.slice(startPrev, currIdx);
+    const prevStates: MessageStateItem[] = rawPrev.map((f, i) => {
+      const offset = -(rawPrev.length - i);
+      const prior = i > 0 ? rawPrev[i - 1] : (startPrev > 0 ? allIdFrames[startPrev - 1] : undefined);
+      return buildItem(f, offset, prior);
+    });
+
+    // Current state (offset 0)
+    const priorToCurrent = currIdx > 0 ? allIdFrames[currIdx - 1] : undefined;
+    const currentState = buildItem(currentFrameObj, 0, priorToCurrent);
+
+    // Up to 5 next frames
+    const rawNext = allIdFrames.slice(currIdx + 1, currIdx + 6);
+    const nextStates: MessageStateItem[] = rawNext.map((f, i) => {
+      const offset = i + 1;
+      const prior = i === 0 ? currentFrameObj : rawNext[i - 1];
+      return buildItem(f, offset, prior);
+    });
+
+    return {
+      prevStates,
+      currentState,
+      nextStates,
+      totalOccurrences: allIdFrames.length,
+      currentIndex: currIdx,
+      allIdFrames
+    };
+  }, [selectedFrame, frames]);
 
   const matchedDbcMsg = selectedFrame 
     ? dbcMessages.find(m => m.hexId.toLowerCase() === selectedFrame.id.toLowerCase() || m.id === selectedFrame.decimalId)
@@ -272,7 +379,7 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
                 <th className="py-2.5 px-3 font-medium">CAN ID</th>
                 <th className="py-2.5 px-3 font-medium">Message Name</th>
                 <th className="py-2.5 px-3 font-medium">DLC</th>
-                <th className="py-2.5 px-3 font-medium">Data Bytes (Hex & Bit Changes)</th>
+                <th className="py-2.5 px-3 font-medium">Data Bytes (D1–D8)</th>
                 <th className="py-2.5 px-3 font-medium">ASCII</th>
                 <th className="py-2.5 px-3 font-medium text-right">Count</th>
               </tr>
@@ -322,23 +429,24 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
                       <td className="py-2 px-3 text-slate-200 font-sans font-medium">{frame.name || 'Unknown'}</td>
                       <td className="py-2 px-3 text-slate-400">{frame.dlc}</td>
 
-                      {/* SavvyLens Byte & Bit Change Highlighting */}
+                      {/* SavvyLens Byte D1-D8 & Bit Change Highlighting */}
                       <td className="py-2 px-3 tracking-wider">
-                        <div className="flex items-center space-x-1.5 font-mono">
+                        <div className="flex items-center space-x-1 font-mono">
                           {frame.data.map((byte, bIdx) => {
                             const isChanged = highlightChanges && frame.changedBytes?.[bIdx];
                             const hexStr = byte.toString(16).toUpperCase().padStart(2, '0');
                             return (
                               <span
                                 key={bIdx}
-                                title={isChanged ? `Byte ${bIdx} changed! Prev: 0x${(frame.prevData?.[bIdx] ?? byte).toString(16).toUpperCase().padStart(2, '0')}` : `Byte ${bIdx}`}
-                                className={`px-1 rounded transition ${
+                                title={isChanged ? `Byte D${bIdx + 1} changed! Prev: 0x${(frame.prevData?.[bIdx] ?? byte).toString(16).toUpperCase().padStart(2, '0')}` : `Byte D${bIdx + 1}: 0x${hexStr}`}
+                                className={`px-1.5 py-0.5 rounded transition inline-flex flex-col items-center ${
                                   isChanged
                                     ? 'bg-amber-500/25 text-amber-300 font-bold border border-amber-500/40 shadow-xs'
-                                    : 'text-slate-300'
+                                    : 'text-slate-300 bg-slate-950/40 border border-slate-800/40'
                                 }`}
                               >
-                                {hexStr}
+                                <span className="text-[8px] text-slate-500 font-sans leading-none pb-0.5 select-none">D{bIdx + 1}</span>
+                                <span className="leading-none text-[11px]">{hexStr}</span>
                               </span>
                             );
                           })}
@@ -358,7 +466,7 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
 
       {/* SavvyLens Frame Inspector: Multi-Tab reverse engineering panel */}
       {selectedFrame && (
-        <div className="w-[420px] bg-slate-900 border-l border-slate-800 flex flex-col shrink-0 overflow-hidden select-none">
+        <div className={`${isInspectorExpanded ? 'w-[640px] xl:w-[720px]' : 'w-[480px] xl:w-[520px]'} bg-slate-900 border-l border-slate-800 flex flex-col shrink-0 overflow-hidden select-none transition-all duration-150`}>
           {/* Top Panel Header */}
           <div className="p-4 border-b border-slate-800 flex items-center justify-between">
             <div className="flex items-center space-x-2">
@@ -368,19 +476,111 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
                 <span className="text-[11px] font-mono text-blue-400">{selectedFrame.id} @ +{selectedFrame.timestamp.toFixed(3)}s</span>
               </div>
             </div>
-            <button 
-              onClick={() => setSelectedFrame(null)}
-              className="text-slate-400 hover:text-white text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 transition"
-            >
-              Close
-            </button>
+            <div className="flex items-center space-x-1.5">
+              <button
+                onClick={() => setIsInspectorExpanded(!isInspectorExpanded)}
+                title={isInspectorExpanded ? 'Collapse inspector width' : 'Expand inspector width'}
+                className="text-slate-400 hover:text-white p-1 rounded bg-slate-800 hover:bg-slate-700 transition cursor-pointer"
+              >
+                {isInspectorExpanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+              </button>
+              <button 
+                onClick={() => setSelectedFrame(null)}
+                className="text-slate-400 hover:text-white text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 transition cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
           </div>
 
+          {/* Occurrence Stepper & Quick Nav for this CAN ID */}
+          {messageStates && (
+            <div className="px-3.5 py-2 bg-slate-950/90 border-b border-slate-800 flex items-center justify-between gap-2">
+              <div className="flex items-center space-x-1.5">
+                <button
+                  onClick={() => {
+                    if (messageStates.currentIndex > 0) {
+                      setSelectedFrame(messageStates.allIdFrames[messageStates.currentIndex - 1]);
+                    }
+                  }}
+                  disabled={messageStates.currentIndex <= 0}
+                  title="Jump to previous occurrence (-1)"
+                  className="p-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+
+                <div className="text-[11px] font-mono whitespace-nowrap">
+                  <span className="text-slate-400">State: </span>
+                  <span className="text-blue-400 font-bold">{messageStates.currentIndex + 1}</span>
+                  <span className="text-slate-500"> / {messageStates.totalOccurrences}</span>
+                </div>
+
+                <button
+                  onClick={() => {
+                    if (messageStates.currentIndex < messageStates.totalOccurrences - 1) {
+                      setSelectedFrame(messageStates.allIdFrames[messageStates.currentIndex + 1]);
+                    }
+                  }}
+                  disabled={messageStates.currentIndex >= messageStates.totalOccurrences - 1}
+                  title="Jump to next occurrence (+1)"
+                  className="p-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Mini State Quick Jump Chips */}
+              <div className="flex items-center space-x-1 font-mono text-[9px] overflow-x-auto py-0.5">
+                {messageStates.prevStates.map(s => (
+                  <button
+                    key={s.relativeOffset}
+                    onClick={() => setSelectedFrame(s.frame)}
+                    title={`Jump to state ${s.relativeOffset} (${s.deltaMs}ms)`}
+                    className="px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800 cursor-pointer transition"
+                  >
+                    {s.relativeOffset}
+                  </button>
+                ))}
+                <span className="px-1.5 py-0.5 rounded bg-blue-600 text-white font-bold shadow-xs">
+                  0
+                </span>
+                {messageStates.nextStates.map(s => (
+                  <button
+                    key={s.relativeOffset}
+                    onClick={() => setSelectedFrame(s.frame)}
+                    title={`Jump to state +${s.relativeOffset} (+${s.deltaMs}ms)`}
+                    className="px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-800 cursor-pointer transition"
+                  >
+                    +{s.relativeOffset}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Navigation Tabs */}
-          <div className="flex border-b border-slate-800 bg-slate-950/60 p-1 text-xs">
+          <div className="flex border-b border-slate-800 bg-slate-950/60 p-1 text-xs gap-1">
+            <button
+              onClick={() => setInspectorTab('states')}
+              className={`flex-1 py-1.5 px-2 rounded-lg font-medium flex items-center justify-center space-x-1 transition cursor-pointer ${
+                inspectorTab === 'states' 
+                  ? 'bg-blue-600 text-white shadow-xs' 
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <History className="w-3.5 h-3.5" />
+              <span>±5 States</span>
+              {messageStates && (
+                <span className="text-[10px] bg-blue-500/20 text-blue-200 px-1 py-0.2 rounded font-mono">
+                  {messageStates.prevStates.length}+{messageStates.nextStates.length}
+                </span>
+              )}
+            </button>
+
             <button
               onClick={() => setInspectorTab('matrix')}
-              className={`flex-1 py-1.5 px-2 rounded-lg font-medium flex items-center justify-center space-x-1.5 transition ${
+              className={`flex-1 py-1.5 px-2 rounded-lg font-medium flex items-center justify-center space-x-1 transition cursor-pointer ${
                 inspectorTab === 'matrix' 
                   ? 'bg-blue-600 text-white shadow-xs' 
                   : 'text-slate-400 hover:text-slate-200'
@@ -392,19 +592,19 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
 
             <button
               onClick={() => setInspectorTab('signal_types')}
-              className={`flex-1 py-1.5 px-2 rounded-lg font-medium flex items-center justify-center space-x-1.5 transition ${
+              className={`flex-1 py-1.5 px-2 rounded-lg font-medium flex items-center justify-center space-x-1 transition cursor-pointer ${
                 inspectorTab === 'signal_types' 
                   ? 'bg-blue-600 text-white shadow-xs' 
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
               <BrainCircuit className="w-3.5 h-3.5" />
-              <span>Signal Analysis</span>
+              <span>Signals</span>
             </button>
 
             <button
               onClick={() => setInspectorTab('correlations')}
-              className={`flex-1 py-1.5 px-2 rounded-lg font-medium flex items-center justify-center space-x-1.5 transition ${
+              className={`flex-1 py-1.5 px-2 rounded-lg font-medium flex items-center justify-center space-x-1 transition cursor-pointer ${
                 inspectorTab === 'correlations' 
                   ? 'bg-blue-600 text-white shadow-xs' 
                   : 'text-slate-400 hover:text-slate-200'
@@ -446,6 +646,467 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
               </div>
             </div>
 
+            {/* Quick Action Bar for Selected Frame */}
+            <div className="flex items-center space-x-2">
+              {onQuickBookmark && (
+                <button
+                  onClick={onQuickBookmark}
+                  className="flex-1 py-1.5 px-2.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition cursor-pointer"
+                >
+                  <BookmarkIcon className="w-3.5 h-3.5" />
+                  <span>Bookmark [B]</span>
+                </button>
+              )}
+              {onAddCanTrigger && (
+                <button
+                  onClick={() => {
+                    setIsMappingTrigger(!isMappingTrigger);
+                    if (!mapTriggerName) {
+                      setMapTriggerName(`${selectedFrame.name || selectedFrame.id} Sync Trigger`);
+                    }
+                  }}
+                  className="flex-1 py-1.5 px-2.5 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition cursor-pointer"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>{isMappingTrigger ? 'Close Map' : 'Map to Trigger'}</span>
+                </button>
+              )}
+            </div>
+
+            {/* Inline CAN Message Trigger Mapper */}
+            {isMappingTrigger && onAddCanTrigger && (
+              <div className="bg-slate-950 p-3 rounded-xl border border-indigo-500/40 space-y-2.5 shadow-sm">
+                <div className="flex items-center justify-between text-indigo-300 font-bold text-xs pb-1 border-b border-slate-800">
+                  <span>Map {selectedFrame.id} as Bookmark Trigger</span>
+                  <span className="text-[10px] text-slate-400">D1–D8</span>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] text-slate-400 mb-1">Trigger Name</label>
+                  <input
+                    type="text"
+                    value={mapTriggerName}
+                    onChange={e => setMapTriggerName(e.target.value)}
+                    placeholder="e.g. Steering Wheel Button"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Target Byte (D1–D8)</label>
+                    <select
+                      value={mapByteChoice}
+                      onChange={e => setMapByteChoice(Number(e.target.value))}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
+                    >
+                      {[1, 2, 3, 4, 5, 6, 7, 8].map(n => {
+                        const bVal = selectedFrame.data[n - 1];
+                        const hexVal = bVal !== undefined ? ` (0x${bVal.toString(16).toUpperCase().padStart(2, '0')})` : '';
+                        return (
+                          <option key={n} value={n}>Byte D{n}{hexVal}</option>
+                        );
+                      })}
+                      <option value={0}>Any Byte (Any on {selectedFrame.id})</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] text-slate-400 mb-1">Current Byte Hex</label>
+                    <div className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-xs font-mono text-amber-300 font-bold">
+                      0x{(selectedFrame.data[mapByteChoice === 0 ? 0 : mapByteChoice - 1] ?? 0).toString(16).toUpperCase().padStart(2, '0')}
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => {
+                    const chosenByteVal = mapByteChoice === 0 
+                      ? 0 
+                      : (selectedFrame.data[mapByteChoice - 1] ?? 0);
+                    const hexStr = `0x${chosenByteVal.toString(16).toUpperCase().padStart(2, '0')}`;
+                    
+                    onAddCanTrigger({
+                      id: 'trig-' + Date.now(),
+                      name: mapTriggerName.trim() || `${selectedFrame.id} Byte D${mapByteChoice} Trigger`,
+                      enabled: true,
+                      canId: selectedFrame.id,
+                      targetByte: mapByteChoice,
+                      condition: mapByteChoice === 0 ? 'any_message' : 'equals',
+                      expectedHex: hexStr,
+                      maskHex: '0xFF',
+                      autoDisableOnTrigger: false,
+                      cooldownMs: 800,
+                      notes: `Auto-mapped from Live Sniffer: ${selectedFrame.id} on Byte ${mapByteChoice === 0 ? 'Any' : `D${mapByteChoice}`} == ${hexStr}`
+                    });
+                    setIsMappingTrigger(false);
+                  }}
+                  className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer shadow-sm"
+                >
+                  Save Trigger (Byte D{mapByteChoice === 0 ? 'Any' : mapByteChoice})
+                </button>
+              </div>
+            )}
+
+            {/* TAB 0: Previous 5 States & Next 5 States */}
+            {inspectorTab === 'states' && messageStates && (
+              <div className="space-y-4">
+                {/* Recording Status & Freeze Buffer Action */}
+                {isCapturing ? (
+                  <div className="bg-amber-950/30 border border-amber-500/30 rounded-xl p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2 text-amber-300 font-semibold text-xs">
+                        <Radio className="w-3.5 h-3.5 animate-pulse text-amber-400" />
+                        <span>Live Recording In Progress</span>
+                      </div>
+                      {onToggleCapture && (
+                        <button
+                          onClick={onToggleCapture}
+                          className="px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1 cursor-pointer transition shadow-xs"
+                        >
+                          <Pause className="w-3 h-3" />
+                          <span>Pause to Freeze</span>
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-300 leading-relaxed">
+                      Showing previous 5 states from live buffer. Next 5 states require paused playback or frames that arrive subsequent to this message.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 flex items-center justify-between">
+                    <div className="flex items-center space-x-2 text-slate-300 font-semibold text-xs">
+                      <Pause className="w-3.5 h-3.5 text-slate-400" />
+                      <span>Recording Paused (Frozen Buffer)</span>
+                    </div>
+                    {onToggleCapture && (
+                      <button
+                        onClick={onToggleCapture}
+                        className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1 cursor-pointer transition shadow-xs"
+                      >
+                        <Play className="w-3 h-3" />
+                        <span>Resume Live</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* View Mode Toggle Header */}
+                <div className="flex items-center justify-between pt-1">
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-200 flex items-center space-x-1.5">
+                      <History className="w-3.5 h-3.5 text-blue-400" />
+                      <span>State Transitions (±5 States)</span>
+                    </h4>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      CAN ID {selectedFrame.id} • {messageStates.totalOccurrences} total instances
+                    </span>
+                  </div>
+
+                  <div className="flex items-center space-x-1 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px]">
+                    <button
+                      onClick={() => setStateViewMode('timeline')}
+                      className={`px-2 py-0.5 rounded font-medium flex items-center space-x-1 transition cursor-pointer ${
+                        stateViewMode === 'timeline'
+                          ? 'bg-blue-600 text-white'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Layers className="w-3 h-3" />
+                      <span>Cards</span>
+                    </button>
+                    <button
+                      onClick={() => setStateViewMode('table')}
+                      className={`px-2 py-0.5 rounded font-medium flex items-center space-x-1 transition cursor-pointer ${
+                        stateViewMode === 'table'
+                          ? 'bg-blue-600 text-white'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <TableIcon className="w-3 h-3" />
+                      <span>Diff Table</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* MODE 1: Vertical Timeline View */}
+                {stateViewMode === 'timeline' && (
+                  <div className="space-y-3">
+                    {/* SECTION 1: Previous 5 States */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-xs text-slate-400">
+                        <span className="font-semibold text-slate-300 flex items-center space-x-1.5">
+                          <span>Previous States</span>
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            ({messageStates.prevStates.length} of 5 available)
+                          </span>
+                        </span>
+                        <span className="text-[10px] text-slate-400">Prior in Time</span>
+                      </div>
+
+                      {messageStates.prevStates.length === 0 ? (
+                        <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-slate-500 text-center text-[11px]">
+                          Initial state: No previous occurrences of {selectedFrame.id} in this session.
+                        </div>
+                      ) : (
+                        messageStates.prevStates.map((stateItem) => (
+                          <div
+                            key={stateItem.relativeOffset}
+                            className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 hover:border-slate-700 transition space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-2">
+                                <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-800">
+                                  State {stateItem.relativeOffset}
+                                </span>
+                                <span className="font-mono text-slate-400 text-[11px]">
+                                  +{stateItem.frame.timestamp.toFixed(4)}s
+                                </span>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <span className="font-mono text-amber-400 font-semibold text-[10px]">
+                                  {stateItem.deltaMs} ms
+                                </span>
+                                <button
+                                  onClick={() => setSelectedFrame(stateItem.frame)}
+                                  className="text-[10px] text-blue-400 hover:text-blue-300 font-semibold hover:underline flex items-center space-x-0.5 cursor-pointer"
+                                >
+                                  <span>Inspect</span>
+                                  <ArrowRight className="w-2.5 h-2.5" />
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* D1-D8 Byte Visualizer with Difference Highlighting */}
+                            <div className="flex items-center space-x-1 font-mono">
+                              {stateItem.frame.data.map((byte, bIdx) => {
+                                const differs = stateItem.changedBytesFromSelected[bIdx];
+                                const hexStr = byte.toString(16).toUpperCase().padStart(2, '0');
+                                return (
+                                  <div
+                                    key={bIdx}
+                                    title={`Byte D${bIdx + 1}: 0x${hexStr}${differs ? ` (Differs from selected: 0x${(selectedFrame.data[bIdx] ?? 0).toString(16).toUpperCase().padStart(2, '0')})` : ''}`}
+                                    className={`flex-1 py-1 rounded text-center text-[11px] font-medium border ${
+                                      differs
+                                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold'
+                                        : 'bg-slate-900 text-slate-400 border-slate-800'
+                                    }`}
+                                  >
+                                    <span className="block text-[7px] text-slate-500 leading-none pb-0.5">D{bIdx + 1}</span>
+                                    <span className="leading-none">{hexStr}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+
+                    {/* SECTION 2: Current Selected State (Anchor) */}
+                    <div className="bg-blue-950/30 border-2 border-blue-500 rounded-xl p-3 space-y-2 shadow-sm">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center space-x-2">
+                          <span className="px-2 py-0.5 rounded-full bg-blue-600 text-white font-bold text-[10px] shadow-xs">
+                            Selected State [0] (Active Anchor)
+                          </span>
+                          <span className="font-mono font-bold text-white text-xs">
+                            +{selectedFrame.timestamp.toFixed(4)}s
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono text-blue-300">
+                          Ref Delta: 0.0 ms
+                        </span>
+                      </div>
+
+                      <div className="flex items-center space-x-1 font-mono">
+                        {selectedFrame.data.map((byte, bIdx) => {
+                          const hexStr = byte.toString(16).toUpperCase().padStart(2, '0');
+                          return (
+                            <div
+                              key={bIdx}
+                              className="flex-1 py-1 rounded text-center text-[11px] font-bold bg-blue-900/50 text-blue-200 border border-blue-400/50"
+                            >
+                              <span className="block text-[7px] text-blue-300/80 leading-none pb-0.5">D{bIdx + 1}</span>
+                              <span className="leading-none">{hexStr}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono pt-1 border-t border-blue-900/40">
+                        <span>ASCII: &quot;{selectedFrame.ascii}&quot;</span>
+                        <span>Occurrence: #{messageStates.currentIndex + 1} of {messageStates.totalOccurrences}</span>
+                      </div>
+                    </div>
+
+                    {/* SECTION 3: Next 5 States */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-xs text-slate-400">
+                        <span className="font-semibold text-slate-300 flex items-center space-x-1.5">
+                          <span>Next States</span>
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            ({messageStates.nextStates.length} of 5 available)
+                          </span>
+                        </span>
+                        <span className="text-[10px] text-slate-400">Subsequent in Time</span>
+                      </div>
+
+                      {messageStates.nextStates.length > 0 && (
+                        messageStates.nextStates.map((stateItem) => (
+                          <div
+                            key={stateItem.relativeOffset}
+                            className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 hover:border-slate-700 transition space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-2">
+                                <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-950/40 text-emerald-300 border border-emerald-500/30">
+                                  State +{stateItem.relativeOffset}
+                                </span>
+                                <span className="font-mono text-slate-400 text-[11px]">
+                                  +{stateItem.frame.timestamp.toFixed(4)}s
+                                </span>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <span className="font-mono text-emerald-400 font-semibold text-[10px]">
+                                  +{stateItem.deltaMs} ms
+                                </span>
+                                <button
+                                  onClick={() => setSelectedFrame(stateItem.frame)}
+                                  className="text-[10px] text-blue-400 hover:text-blue-300 font-semibold hover:underline flex items-center space-x-0.5 cursor-pointer"
+                                >
+                                  <span>Inspect</span>
+                                  <ArrowRight className="w-2.5 h-2.5" />
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* D1-D8 Byte Visualizer */}
+                            <div className="flex items-center space-x-1 font-mono">
+                              {stateItem.frame.data.map((byte, bIdx) => {
+                                const differs = stateItem.changedBytesFromSelected[bIdx];
+                                const hexStr = byte.toString(16).toUpperCase().padStart(2, '0');
+                                return (
+                                  <div
+                                    key={bIdx}
+                                    title={`Byte D${bIdx + 1}: 0x${hexStr}${differs ? ` (Differs from selected: 0x${(selectedFrame.data[bIdx] ?? 0).toString(16).toUpperCase().padStart(2, '0')})` : ''}`}
+                                    className={`flex-1 py-1 rounded text-center text-[11px] font-medium border ${
+                                      differs
+                                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold'
+                                        : 'bg-slate-900 text-slate-400 border-slate-800'
+                                    }`}
+                                  >
+                                    <span className="block text-[7px] text-slate-500 leading-none pb-0.5">D{bIdx + 1}</span>
+                                    <span className="leading-none">{hexStr}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))
+                      )}
+
+                      {messageStates.nextStates.length < 5 && (
+                        <div className="p-3 bg-slate-950 rounded-xl border border-slate-800/80 text-slate-400 text-[11px] space-y-1">
+                          {isCapturing ? (
+                            <div className="flex items-start space-x-2">
+                              <Radio className="w-4 h-4 text-amber-400 shrink-0 mt-0.5 animate-pulse" />
+                              <div>
+                                <span className="font-semibold text-slate-200">Recording at live head:</span>{' '}
+                                Subsequent states (+{messageStates.nextStates.length + 1} to +5) will append as new {selectedFrame.id} frames arrive. Pause recording to freeze and inspect historical logs.
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-slate-500 text-center">
+                              End of session reached: No further occurrences of {selectedFrame.id} recorded in this session.
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* MODE 2: High-Density Matrix Diff Table View */}
+                {stateViewMode === 'table' && (
+                  <div className="bg-slate-950 rounded-xl border border-slate-800 overflow-x-auto">
+                    <table className="w-full text-left font-mono text-[10px]">
+                      <thead>
+                        <tr className="border-b border-slate-800 text-slate-400 bg-slate-900/60">
+                          <th className="py-2 px-2">State</th>
+                          <th className="py-2 px-2">Delta</th>
+                          {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
+                            <th key={n} className="py-2 px-1 text-center">D{n}</th>
+                          ))}
+                          <th className="py-2 px-2">ASCII</th>
+                          <th className="py-2 px-1 text-right">Jump</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60">
+                        {[...messageStates.prevStates, messageStates.currentState!, ...messageStates.nextStates].map((item) => {
+                          const isCurrent = item.relativeOffset === 0;
+                          return (
+                            <tr
+                              key={item.relativeOffset}
+                              className={`transition ${
+                                isCurrent
+                                  ? 'bg-blue-950/40 text-white font-bold'
+                                  : 'hover:bg-slate-900/80 text-slate-300'
+                              }`}
+                            >
+                              <td className="py-1.5 px-2 font-bold whitespace-nowrap">
+                                {isCurrent ? (
+                                  <span className="text-blue-400 font-extrabold">[0] Current</span>
+                                ) : item.relativeOffset > 0 ? (
+                                  <span className="text-emerald-400">+{item.relativeOffset}</span>
+                                ) : (
+                                  <span className="text-slate-400">{item.relativeOffset}</span>
+                                )}
+                              </td>
+                              <td className="py-1.5 px-2 whitespace-nowrap text-slate-400">
+                                {item.relativeOffset === 0 ? '0.0 ms' : `${item.deltaMs > 0 ? '+' : ''}${item.deltaMs} ms`}
+                              </td>
+                              {item.frame.data.map((b, bIdx) => {
+                                const differs = !isCurrent && item.changedBytesFromSelected[bIdx];
+                                return (
+                                  <td
+                                    key={bIdx}
+                                    className={`py-1.5 px-1 text-center font-mono ${
+                                      differs
+                                        ? 'bg-amber-500/20 text-amber-300 font-bold'
+                                        : isCurrent
+                                        ? 'text-blue-200'
+                                        : 'text-slate-300'
+                                    }`}
+                                  >
+                                    {b.toString(16).toUpperCase().padStart(2, '0')}
+                                  </td>
+                                );
+                              })}
+                              <td className="py-1.5 px-2 text-slate-400 whitespace-nowrap">
+                                {item.frame.ascii}
+                              </td>
+                              <td className="py-1.5 px-1 text-right">
+                                {isCurrent ? (
+                                  <span className="text-[9px] text-blue-400 font-semibold">Active</span>
+                                ) : (
+                                  <button
+                                    onClick={() => setSelectedFrame(item.frame)}
+                                    className="px-1.5 py-0.5 rounded bg-slate-900 hover:bg-slate-800 text-blue-400 hover:text-blue-300 border border-slate-800 text-[9px] cursor-pointer"
+                                  >
+                                    Jump
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* TAB 1: Bit Matrix & Decoded DBC */}
             {inspectorTab === 'matrix' && (
               <>
@@ -474,7 +1135,7 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
                           }`}
                         >
                           <div className="flex items-center justify-between text-slate-400 mb-1.5 text-[10px]">
-                            <span>Byte {bIdx} (0x{byte.toString(16).toUpperCase().padStart(2, '0')})</span>
+                            <span>Byte D{bIdx + 1} (0x{byte.toString(16).toUpperCase().padStart(2, '0')})</span>
                             {isByteChanged && <span className="text-amber-400 font-semibold">Toggled Bits Detected</span>}
                           </div>
 
@@ -581,7 +1242,7 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
                         <div className="flex items-center justify-between">
                           <div className="flex items-center space-x-2">
                             <span className="font-mono font-bold text-white text-xs bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
-                              Byte {byteAnalysis.byteIndex}
+                              Byte D{byteAnalysis.byteIndex + 1}
                             </span>
                             <span className="font-mono text-slate-400 text-xs">
                               0x{currentByteVal.toString(16).toUpperCase().padStart(2, '0')}

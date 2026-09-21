@@ -15,9 +15,52 @@ import { BookmarkManagerView, AutoArmConfig } from './components/BookmarkManager
 import { CanBridgeView } from './components/CanBridgeView';
 import { ConnectionsView } from './components/ConnectionsView';
 import { ConnectionModal } from './components/ConnectionModal';
+import { ImportModal } from './components/ImportModal';
 import { PlaybackStatusBar } from './components/PlaybackStatusBar';
 import { INITIAL_CONNECTIONS, INITIAL_DBC_MESSAGES, generateInitialCANFrames } from './data/mockData';
-import { CANFrame, ConnectionConfig, DBCMessage, ScriptItem, Bookmark } from './types';
+import { CANFrame, ConnectionConfig, DBCMessage, ScriptItem, Bookmark, CANMessageTrigger } from './types';
+
+const INITIAL_CAN_TRIGGERS: CANMessageTrigger[] = [
+  {
+    id: 'trig-steering-btn',
+    name: 'Steering Wheel Button (Cruise/Media)',
+    enabled: true,
+    canId: '0x156',
+    targetByte: 1, // Byte D1
+    condition: 'equals',
+    expectedHex: '0x24',
+    maskHex: '0xFF',
+    autoDisableOnTrigger: false,
+    cooldownMs: 800,
+    notes: 'Triggered when steering wheel button is depressed (Byte D1 == 0x24)'
+  },
+  {
+    id: 'trig-brake-switch',
+    name: 'Brake Pedal Switch Active',
+    enabled: false,
+    canId: '0x201',
+    targetByte: 4, // Byte D4
+    condition: 'equals',
+    expectedHex: '0x02',
+    maskHex: '0xFF',
+    autoDisableOnTrigger: false,
+    cooldownMs: 1000,
+    notes: 'Brake switch contact closed (Byte D4 == 0x02)'
+  },
+  {
+    id: 'trig-abs-pulse',
+    name: 'ABS Wheel Slip Event',
+    enabled: false,
+    canId: '0x320',
+    targetByte: 5, // Byte D5
+    condition: 'equals',
+    expectedHex: '0x01',
+    maskHex: '0xFF',
+    autoDisableOnTrigger: true,
+    cooldownMs: 1500,
+    notes: 'ABS intervention flag detected on Byte D5'
+  }
+];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('sniffer');
@@ -25,9 +68,11 @@ export default function App() {
   const [connections, setConnections] = useState<ConnectionConfig[]>(INITIAL_CONNECTIONS);
   const [dbcMessages, setDbcMessages] = useState<DBCMessage[]>(INITIAL_DBC_MESSAGES);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [canTriggers, setCanTriggers] = useState<CANMessageTrigger[]>(INITIAL_CAN_TRIGGERS);
   const [snifferFilterTerm, setSnifferFilterTerm] = useState('');
   const [isCapturing, setIsCapturing] = useState(true);
   const [isConnModalOpen, setIsConnModalOpen] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // SavvyLens Auto-Arm Configuration
@@ -43,6 +88,9 @@ export default function App() {
 
   const autoArmRef = useRef(autoArm);
   autoArmRef.current = autoArm;
+
+  const canTriggersRef = useRef(canTriggers);
+  canTriggersRef.current = canTriggers;
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -60,7 +108,8 @@ export default function App() {
   const handleCreateBookmark = useCallback((
     title?: string, 
     description?: string, 
-    triggerMode: 'Manual' | 'Shortcut' | 'Auto-Armed' = 'Manual'
+    triggerMode: 'Manual' | 'Shortcut' | 'Auto-Armed' | 'CAN-Triggered' = 'Manual',
+    extraData?: Partial<Bookmark>
   ): Bookmark => {
     const currentFrames = framesRef.current;
     const currentTs = currentFrames.length > 0 ? currentFrames[currentFrames.length - 1].timestamp : 0;
@@ -94,21 +143,141 @@ export default function App() {
       newIdsDetected,
       changedIdsDetected,
       deltaWindowMs: currentArm.deltaWindowMs,
-      triggerMode
+      triggerMode,
+      ...extraData
     };
 
     setBookmarks(prev => [newBm, ...prev]);
 
     // Auto-disable detector if armed
-    if (currentArm.enabled && currentArm.autoDisableOnTrigger) {
+    if (triggerMode === 'Auto-Armed' && currentArm.enabled && currentArm.autoDisableOnTrigger) {
       setAutoArm(prev => ({ ...prev, enabled: false }));
       showToast(`SavvyLens: Auto-Arm triggered and auto-disabled. Recorded ${newIdsDetected.length} new ID(s).`);
+    } else if (triggerMode === 'CAN-Triggered') {
+      showToast(`SavvyLens: CAN Trigger fired: ${extraData?.matchedTriggerName || title} (${extraData?.matchedByteLabel || ''})`);
     } else {
       showToast(`SavvyLens: Bookmark recorded (+${currentTs.toFixed(2)}s)`);
     }
 
     return newBm;
   }, []);
+
+  // CAN Message Trigger Evaluator (e.g. Steering wheel button, pedal switches)
+  const evaluateFrameForTriggers = useCallback((frame: CANFrame) => {
+    const triggers = canTriggersRef.current;
+    if (!triggers || triggers.length === 0) return;
+
+    const now = Date.now();
+    const normalizedFrameId = frame.id.toLowerCase().replace('0x', '');
+
+    triggers.forEach(trigger => {
+      if (!trigger.enabled) return;
+
+      const normalizedTriggerId = trigger.canId.toLowerCase().replace('0x', '');
+      if (normalizedFrameId !== normalizedTriggerId) return;
+
+      // Cooldown check
+      if (trigger.lastTriggeredTimestamp && (now - trigger.lastTriggeredTimestamp < (trigger.cooldownMs || 500))) {
+        return;
+      }
+
+      let isMatch = false;
+      let byteLabel = 'Any Byte';
+      const targetB = trigger.targetByte; // 1 to 8 (D1 to D8), or 0 for Any
+
+      if (targetB === 0 || trigger.condition === 'any_message') {
+        isMatch = true;
+        byteLabel = `Any frame on ${frame.id}`;
+      } else if (targetB >= 1 && targetB <= 8) {
+        const bIdx = targetB - 1;
+        const actualByte = frame.data[bIdx] ?? 0;
+        const expectedByte = parseInt(trigger.expectedHex.replace('0x', ''), 16) || 0;
+        const mask = trigger.maskHex ? (parseInt(trigger.maskHex.replace('0x', ''), 16) || 0xFF) : 0xFF;
+
+        byteLabel = `Byte D${targetB}`;
+
+        if (trigger.condition === 'equals') {
+          isMatch = (actualByte & mask) === (expectedByte & mask);
+          byteLabel += ` == 0x${expectedByte.toString(16).toUpperCase().padStart(2, '0')}`;
+        } else if (trigger.condition === 'mask_set') {
+          isMatch = (actualByte & mask) !== 0;
+          byteLabel += ` & 0x${mask.toString(16).toUpperCase().padStart(2, '0')} != 0`;
+        } else if (trigger.condition === 'changed') {
+          isMatch = !!frame.changedBytes?.[bIdx];
+          byteLabel += ` changed`;
+        }
+      }
+
+      if (isMatch) {
+        trigger.lastTriggeredTimestamp = now;
+        if (trigger.autoDisableOnTrigger) {
+          setCanTriggers(prev => prev.map(t => t.id === trigger.id ? { ...t, enabled: false } : t));
+        }
+
+        const payloadStr = frame.data.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+
+        handleCreateBookmark(
+          trigger.name,
+          `Mapped CAN trigger matched on ${frame.id} (${byteLabel}). Payload: [${payloadStr}]`,
+          'CAN-Triggered',
+          {
+            matchedTriggerName: trigger.name,
+            matchedCanId: frame.id,
+            matchedByteLabel: byteLabel,
+            matchedPayload: payloadStr
+          }
+        );
+      }
+    });
+  }, [handleCreateBookmark]);
+
+  const evaluateFrameForTriggersRef = useRef(evaluateFrameForTriggers);
+  evaluateFrameForTriggersRef.current = evaluateFrameForTriggers;
+
+  // Simulate receiving a mapped CAN trigger frame (e.g. steering wheel button push)
+  const handleSimulateCanTrigger = (trigger: CANMessageTrigger) => {
+    const currentFrames = framesRef.current;
+    const lastTs = currentFrames.length > 0 ? currentFrames[currentFrames.length - 1].timestamp : 120.0;
+    const newTs = Number((lastTs + 0.05).toFixed(3));
+
+    const data = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    const expectedByte = parseInt(trigger.expectedHex.replace('0x', ''), 16) || 0x24;
+
+    if (trigger.targetByte >= 1 && trigger.targetByte <= 8) {
+      data[trigger.targetByte - 1] = expectedByte;
+    } else {
+      data[0] = expectedByte;
+    }
+
+    const lastMatch = [...currentFrames].reverse().find(f => f.id.toLowerCase() === trigger.canId.toLowerCase());
+    const changedBytes = data.map((b, i) => !lastMatch || lastMatch.data[i] !== b);
+    const changedBits = data.map((b, i) => lastMatch ? ((lastMatch.data[i] ^ b) & 0xFF) : 0);
+
+    const simFrame: CANFrame = {
+      id: trigger.canId,
+      decimalId: parseInt(trigger.canId.replace('0x', ''), 16) || 342,
+      name: trigger.name,
+      timestamp: newTs,
+      bus: 0,
+      dlc: 8,
+      data,
+      ascii: data.map(b => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join(''),
+      count: lastMatch ? lastMatch.count + 1 : 1,
+      direction: 'RX',
+      changedBytes,
+      changedBits,
+      prevData: lastMatch ? lastMatch.data : undefined,
+      isNewId: !lastMatch
+    };
+
+    setFrames(prev => {
+      const next = [...prev, simFrame];
+      return next.length > 500 ? next.slice(next.length - 500) : next;
+    });
+
+    evaluateFrameForTriggers(simFrame);
+    showToast(`SavvyLens: Transmitted simulated trigger frame for ${trigger.name}`);
+  };
 
   // Global Keyboard Shortcut [B] Listener for SavvyLens Instant Bookmarks
   useEffect(() => {
@@ -195,6 +364,9 @@ export default function App() {
         const next = [...prev, newFrame];
         return next.length > 500 ? next.slice(next.length - 500) : next;
       });
+
+      // Evaluate simulated traffic against mapped CAN triggers
+      evaluateFrameForTriggersRef.current(newFrame);
     }, 500);
 
     return () => clearInterval(interval);
@@ -238,6 +410,7 @@ export default function App() {
     };
 
     setFrames(prev => [...prev, newFrame]);
+    evaluateFrameForTriggers(newFrame);
 
     // Check SavvyLens Auto-Arm Trigger conditions
     if (autoArmRef.current.enabled) {
@@ -271,7 +444,47 @@ export default function App() {
   };
 
   const handleImportLogs = () => {
-    showToast("SavvyLens: Import ready for .trc, .csv, .log, and .dbc trace files.");
+    setIsImportModalOpen(true);
+  };
+
+  const handleImportFrames = (newFrames: CANFrame[], replace: boolean) => {
+    // Enrich imported frames with existing DBC message names if missing
+    const dbcMap = new Map(dbcMessages.map(m => [m.hexId.toLowerCase(), m.name]));
+    const enriched = newFrames.map(f => {
+      if (!f.name) {
+        const found = dbcMap.get(f.id.toLowerCase());
+        if (found) return { ...f, name: found };
+      }
+      return f;
+    });
+
+    if (replace) {
+      setFrames(enriched);
+      showToast(`SavvyLens: Loaded ${enriched.length} CAN frames (Buffer Replaced)`);
+    } else {
+      setFrames(prev => [...prev, ...enriched]);
+      showToast(`SavvyLens: Appended ${enriched.length} CAN frames to feed`);
+    }
+  };
+
+  const handleImportDbc = (importedDbc: DBCMessage[], replace: boolean) => {
+    if (replace) {
+      setDbcMessages(importedDbc);
+      showToast(`SavvyLens: Loaded ${importedDbc.length} DBC message definitions`);
+    } else {
+      setDbcMessages(prev => {
+        const incomingIds = new Set(importedDbc.map(m => m.hexId.toLowerCase()));
+        return [...importedDbc, ...prev.filter(m => !incomingIds.has(m.hexId.toLowerCase()))];
+      });
+      showToast(`SavvyLens: Merged ${importedDbc.length} DBC definitions`);
+    }
+
+    // Auto-update active frames with matching DBC names
+    const dbcMap = new Map(importedDbc.map(m => [m.hexId.toLowerCase(), m.name]));
+    setFrames(prev => prev.map(f => {
+      const matchName = dbcMap.get(f.id.toLowerCase());
+      return matchName ? { ...f, name: matchName } : f;
+    }));
   };
 
   const handleRunScript = (script: ScriptItem) => {
@@ -348,7 +561,13 @@ export default function App() {
                 setBookmarks(prev => [newBm, ...prev]);
                 showToast(`SavvyLens: Event bookmark created from frame with ${correlatedIds.length} correlated IDs`);
               }}
+              onAddCanTrigger={(trig) => {
+                setCanTriggers(prev => [...prev, trig]);
+                showToast(`SavvyLens: Mapped CAN trigger added for ${trig.name}`);
+              }}
               initialSearchTerm={snifferFilterTerm}
+              isCapturing={isCapturing}
+              onToggleCapture={() => setIsCapturing(prev => !prev)}
             />
           )}
           {activeTab === 'dbc' && (
@@ -375,6 +594,9 @@ export default function App() {
                 setSnifferFilterTerm(id);
                 setActiveTab('sniffer');
               }}
+              canTriggers={canTriggers}
+              setCanTriggers={setCanTriggers}
+              onSimulateCanTrigger={handleSimulateCanTrigger}
             />
           )}
           {activeTab === 'bridge' && <CanBridgeView />}
@@ -419,6 +641,14 @@ export default function App() {
         connections={connections}
         setConnections={setConnections}
         onConnectDevice={handleConnectDevice}
+      />
+
+      <ImportModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onImportFrames={handleImportFrames}
+        onImportDbc={handleImportDbc}
+        activeFrameCount={frames.length}
       />
     </div>
   );
