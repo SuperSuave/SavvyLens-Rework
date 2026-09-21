@@ -1,0 +1,44 @@
+#ifndef RANGESTATEWINDOW_H
+#define RANGESTATEWINDOW_H
+
+// SavvyLens headers
+#include "analysis/rangestatistics.h"
+#include "can/can_structs.h"
+
+// QT headers
+#include <QDialog>
+#include <QMap>
+
+namespace Ui {
+class RangeStateWindow;
+}
+
+class RangeStateWindow : public QDialog
+{
+    Q_OBJECT
+
+public:
+    explicit RangeStateWindow(const QVector<CANFrame> *frames, QWidget *parent = 0);
+    ~RangeStateWindow();
+    void showEvent(QShowEvent*);
+
+private slots:
+    void updatedFrames(int);
+    void recalcButton();
+    void clickedSignalList(int idx);
+
+private:
+    Ui::RangeStateWindow *ui;
+    const QVector<CANFrame> *modelFrames;
+    QVector<RangeSignalCandidate> foundCandidates;
+    QMap<int, bool> idFilters;
+
+    void refreshFilterList();
+    void closeEvent(QCloseEvent *event);
+    void readSettings();
+    void writeSettings();
+    void createGraph(const QVector<qint64> &values);
+    bool eventFilter(QObject *obj, QEvent *event);
+};
+
+#endif // RANGESTATEWINDOW_H

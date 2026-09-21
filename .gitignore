@@ -1,0 +1,77 @@
+# Build directories
+build/
+**/build/
+debug/
+release/
+**/debug/
+**/release/
+.qtcreator/
+**/.qtcreator/
+.qtc_clangd/
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Compiled translations
+*.qm
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+*.user
+SavvyLens
+test/test
+
+# Generated qmake makefiles and scripts
+Makefile*
+**/Makefile*
+object_script.*
+**/object_script.*
+SavvyLens_resource.rc
+*.qmake.stash
+**/.qmake.stash
+.qmake.cache
+.qmake.stash
+
+# Generated Qt files
+**/moc_*
+**/ui_*.h
+**/qrc_*.cpp
+SavvyLens.pro.user.*
+
+# Test run logs and temporary output
+test_*.txt
+**/test_*.txt
+test_out.txt
+test_output.txt
+test_results.txt
+*.log
+
+# Editor & IDE files
+*.code-workspace
+SavvyLens.pro.qtds
+.xcode
+SavvyLens.xcodeproj
+.vscode/
