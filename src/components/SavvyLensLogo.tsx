@@ -11,7 +11,7 @@ export const SavvyLensLogo: React.FC<SavvyLensLogoProps> = ({
 }) => {
   return (
     <img
-      src="/SavvyLens-full.svg"
+      src="./SavvyLens-full.svg"
       alt="SavvyLens Logo"
       width={size}
       height={size}
