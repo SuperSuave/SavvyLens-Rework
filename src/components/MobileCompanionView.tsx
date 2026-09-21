@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { 
   Wifi, Radio, Bookmark as BookmarkIcon, Sliders, Play, Pause, 
-  Trash2, Send, Plus, CheckCircle, AlertCircle, RefreshCw, Layers, Search, Eye, Sparkles, Terminal
+  Trash2, Send, Plus, CheckCircle, AlertCircle, RefreshCw, Layers, Search, Eye, Sparkles, Terminal, Smartphone
 } from 'lucide-react';
 import { CANFrame, ConnectionConfig, DBCMessage, Bookmark, CANMessageTrigger } from '../types';
 
@@ -18,6 +18,7 @@ interface MobileCompanionViewProps {
   handleSendCustomFrame: (id: string, data: number[]) => void;
   handleCreateBookmark: (title?: string, description?: string, mode?: any) => void;
   showToast: (msg: string) => void;
+  setActiveTab: (tab: string) => void;
 }
 
 export function MobileCompanionView({
@@ -32,7 +33,8 @@ export function MobileCompanionView({
   handleConnectDevice,
   handleSendCustomFrame,
   handleCreateBookmark,
-  showToast
+  showToast,
+  setActiveTab
 }: MobileCompanionViewProps) {
   const [mobileTab, setMobileTab] = useState<'sniffer' | 'inspector' | 'bookmarks' | 'sender' | 'settings'>('sniffer');
   const [selectedFrame, setSelectedFrame] = useState<CANFrame | null>(null);
@@ -104,6 +106,14 @@ export function MobileCompanionView({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setActiveTab('sniffer')}
+            className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold border border-rose-500 flex items-center gap-1.5 transition shadow cursor-pointer"
+            title="Exit Mobile Companion and Return to Desktop View"
+          >
+            <Smartphone className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Exit Mobile View</span>
+          </button>
           <button
             onClick={() => setIsCapturing(!isCapturing)}
             className={`p-2 rounded-lg text-xs font-medium flex items-center gap-1 transition-all ${
@@ -429,23 +439,6 @@ export function MobileCompanionView({
                   >
                     Connect WiCAN
                   </button>
-                  <button
-                    onClick={() => {
-                      handleConnectDevice({
-                        id: 'conn-demo',
-                        name: 'Simulated Bus',
-                        type: 'Simulated',
-                        port: '0',
-                        status: 'Connected',
-                        baudRate: 500000,
-                        isLogging: true
-                      });
-                      showToast('Switched to simulated demo bus');
-                    }}
-                    className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-medium text-xs"
-                  >
-                    Demo Mode
-                  </button>
                 </div>
               </div>
             </div>
@@ -467,6 +460,20 @@ export function MobileCompanionView({
           </div>
         )}
 
+      </div>
+
+      {/* Floating Action Button (FAB) for instant bookmarking on mobile */}
+      <div className="fixed bottom-16 right-5 z-50">
+        <button
+          onClick={() => {
+            handleCreateBookmark('Quick Mobile Bookmark', 'Dropped via mobile touch shortcut', 'Manual');
+            showToast('Bookmark dropped!');
+          }}
+          className="w-14 h-14 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white rounded-full shadow-2xl flex items-center justify-center border-2 border-indigo-400/40 transition-all cursor-pointer"
+          title="Drop Bookmark Instantly"
+        >
+          <Plus className="w-7 h-7" />
+        </button>
       </div>
 
       {/* Thumb-friendly Bottom Navigation Bar */}

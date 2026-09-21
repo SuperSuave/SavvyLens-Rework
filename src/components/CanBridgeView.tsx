@@ -2,11 +2,7 @@ import React, { useState } from 'react';
 import { Network, ArrowRightLeft, ShieldCheck, Plus } from 'lucide-react';
 
 export const CanBridgeView: React.FC = () => {
-  const [bridgeRules, setBridgeRules] = useState([
-    { id: 1, sourceBus: 'can0', destBus: 'can1', filterId: '0x123', action: 'Forward & Modify', active: true },
-    { id: 2, sourceBus: 'can1', destBus: 'can0', filterId: '0x7E0', action: 'Forward Only', active: true },
-    { id: 3, sourceBus: 'can0', destBus: 'can1', filterId: '0x300 - 0x3FF', action: 'Drop / Block', active: false },
-  ]);
+  const [bridgeRules, setBridgeRules] = useState<any[]>([]);
 
   return (
     <div className="flex-1 flex flex-col bg-slate-950 text-slate-100 p-6 overflow-y-auto">

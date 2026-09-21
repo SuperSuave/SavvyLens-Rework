@@ -288,25 +288,7 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
     setLatchedPulses(new Map());
   };
 
-  // E-GMP Test Workflow 1: Simulate Steering Wheel Button Pulse (00 -> 40 -> 00)
-  const handleSimulateEgmpButtonPulse = () => {
-    // Step 1: Active button press (Byte D4 = 0x40)
-    onSendCustomFrame("0x180", [0x10, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x0F]);
-    // Step 2: Released 150ms later (Byte D4 returns to 0x00)
-    setTimeout(() => {
-      onSendCustomFrame("0x180", [0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10]);
-    }, 150);
-  };
 
-  // E-GMP Test Workflow 2: Simulate HVAC Command (06/06) & State Echo (06)
-  const handleSimulateEgmpHvacCommand = () => {
-    // Command on 0x320 with Byte D4/D5 = 0x06
-    onSendCustomFrame("0x320", [0x01, 0x00, 0x00, 0x06, 0x06, 0x00, 0x00, 0x22]);
-    // State update on 0x485 with Byte D2 = 0x06 arriving 45ms later
-    setTimeout(() => {
-      onSendCustomFrame("0x485", [0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05]);
-    }, 45);
-  };
 
   // Live Pulse Tracking when Baseline is Active
   React.useEffect(() => {
@@ -983,27 +965,7 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
             )}
           </div>
 
-          {/* Quick Simulation Triggers for User Workflows */}
-          <div className="flex items-center space-x-2">
-            <span className="text-[11px] text-slate-500 font-medium">E-GMP Test Injections:</span>
-            <button
-              onClick={handleSimulateEgmpButtonPulse}
-              className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-amber-500/60 text-amber-300 rounded-lg font-mono text-[11px] transition flex items-center space-x-1"
-              title="Inject 0x180 Byte D4: 00 -> 40 -> 00 (Momentary steering button pulse)"
-            >
-              <Zap className="w-3 h-3 text-amber-400" />
-              <span>Simulate Pulse (00➔40➔00)</span>
-            </button>
 
-            <button
-              onClick={handleSimulateEgmpHvacCommand}
-              className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-blue-500/60 text-blue-300 rounded-lg font-mono text-[11px] transition flex items-center space-x-1"
-              title="Inject 0x320 Cmd (06/06) & 0x485 State (06) echo 45ms later"
-            >
-              <GitMerge className="w-3 h-3 text-blue-400" />
-              <span>Simulate HVAC (Cmd➔Echo)</span>
-            </button>
-          </div>
         </div>
 
         {/* Mode-Specific Action Bar (Notching, Sorting, Auto-scroll, Row Telemetry) */}

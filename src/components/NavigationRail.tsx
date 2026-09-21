@@ -19,7 +19,6 @@ export const NavigationRail: React.FC<NavigationRailProps> = ({
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
 
   const tabs = [
-    { id: 'mobile-companion', label: 'Mobile Companion', icon: Smartphone, description: 'Touch-optimized mobile UI for Android & phones' },
     { id: 'sniffer', label: 'Live Sniffer', icon: Layers, description: 'Real-time CAN frame grid & baseline latch' },
     { id: 'playback', label: 'Log Baseline & Replay', icon: Film, description: 'Offline relative & range baseline analysis' },
     { id: 'dbc', label: 'DBC Manager', icon: Database, description: 'Signal decoders & message database' },

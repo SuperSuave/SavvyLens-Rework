@@ -136,18 +136,25 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="font-medium">Import</span>
         </button>
 
-        <button
-          onClick={() => setActiveTab('mobile-companion')}
-          title="Switch to Mobile Companion View (Android / Touch Optimized)"
-          className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition ${
-            activeTab === 'mobile-companion'
-              ? 'bg-indigo-600 text-white border-indigo-500 shadow'
-              : 'bg-slate-800 hover:bg-slate-700 text-indigo-300 border-slate-700'
-          }`}
-        >
-          <Smartphone className="w-3.5 h-3.5" />
-          <span className="hidden md:inline">Mobile Mode</span>
-        </button>
+        {activeTab === 'mobile-companion' ? (
+          <button
+            onClick={() => setActiveTab('sniffer')}
+            title="Exit Mobile View / Return to Desktop"
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border bg-rose-600 hover:bg-rose-500 text-white border-rose-500 shadow transition cursor-pointer"
+          >
+            <Smartphone className="w-3.5 h-3.5" />
+            <span>Exit Mobile View</span>
+          </button>
+        ) : (
+          <button
+            onClick={() => setActiveTab('mobile-companion')}
+            title="Switch to Mobile Companion View (Touch Optimized)"
+            className="md:hidden flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border bg-slate-800 hover:bg-slate-700 text-indigo-300 border-slate-700 transition cursor-pointer"
+          >
+            <Smartphone className="w-3.5 h-3.5" />
+            <span>Mobile Mode</span>
+          </button>
+        )}
       </div>
     </header>
   );

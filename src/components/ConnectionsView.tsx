@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { 
   Cpu, Radio, Plus, Trash2, CheckCircle2, AlertCircle, Wifi, 
-  Settings2, Activity, ArrowRight, Shield, Zap, Cable, Play, Pause
+  Settings2, Activity, ArrowRight, Shield, Zap, Cable, Play, Pause, Smartphone
 } from 'lucide-react';
 import { ConnectionConfig } from '../types';
 import { NetworkDeviceDetector } from './NetworkDeviceDetector';
@@ -12,6 +12,7 @@ interface ConnectionsViewProps {
   onConnectDevice: (connection: ConnectionConfig) => void;
   onDisconnectDevice: (connectionId: string) => void;
   onNavigateToSniffer: () => void;
+  onSwitchToMobile?: () => void;
 }
 
 export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
@@ -19,7 +20,8 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   setConnections,
   onConnectDevice,
   onDisconnectDevice,
-  onNavigateToSniffer
+  onNavigateToSniffer,
+  onSwitchToMobile
 }) => {
   const [showManualForm, setShowManualForm] = useState(false);
   const [newConnName, setNewConnName] = useState('');
@@ -68,6 +70,17 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           </div>
 
           <div className="flex items-center space-x-3">
+            {onSwitchToMobile && (
+              <button
+                onClick={onSwitchToMobile}
+                className="px-3 py-2 bg-indigo-900/40 hover:bg-indigo-900/70 text-indigo-200 border border-indigo-700/60 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition"
+                title="Switch to Mobile Companion View"
+              >
+                <Smartphone className="w-4 h-4 text-indigo-400" />
+                <span>Mobile UI Mode</span>
+              </button>
+            )}
+
             {activeConnection && (
               <button
                 onClick={onNavigateToSniffer}
@@ -137,7 +150,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   <option value="SocketCAN">SocketCAN (Linux native can0/can1)</option>
                   <option value="Lawicel">Lawicel / CANtact / SLCAN</option>
                   <option value="MQTT">MQTT CAN Bus Telemetry Bridge</option>
-                  <option value="Simulated">Software Simulator</option>
+
                 </select>
               </div>
 

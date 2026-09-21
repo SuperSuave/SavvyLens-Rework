@@ -4,65 +4,7 @@ import { DetectedDevice, ConnectionConfig } from '../types';
  * Predefined hardware discovery presets for WiCAN OBD-II devices (ESP32-C3)
  * running CAN-Do (SuperSuave custom firmware) or MeatPi stock firmware.
  */
-export const DEFAULT_DISCOVERABLE_DEVICES: DetectedDevice[] = [
-  {
-    id: 'cando-obd-01',
-    name: 'CAN-Do OBD-II (SuperSuave)',
-    family: 'CAN-Do',
-    model: 'WiCAN OBD-II (ESP32-C3)',
-    ipAddress: '192.168.4.1',
-    tcpPort: 23,
-    protocol: 'GVRET_IP',
-    macAddress: 'DC:54:75:A8:12:F0',
-    hostname: 'cando.local',
-    firmwareVersion: 'CAN-Do (SuperSuave/can-do)',
-    rssi: -46,
-    channelCount: 1,
-    activeBitrate: 500000,
-    status: 'Discovered',
-    batteryVoltage: 12.6,
-    lastSeenMs: Date.now(),
-    isAccessPointMode: true
-  },
-  {
-    id: 'wican-obd-stock',
-    name: 'WiCAN OBD-II (MeatPi Stock)',
-    family: 'WiCAN',
-    model: 'WiCAN OBD-II (ESP32-C3)',
-    ipAddress: '192.168.1.145',
-    tcpPort: 23,
-    protocol: 'GVRET_IP',
-    macAddress: 'DC:54:75:32:B1:09',
-    hostname: 'wican.local',
-    firmwareVersion: 'MeatPi Stock v3.15',
-    rssi: -56,
-    channelCount: 1,
-    activeBitrate: 500000,
-    status: 'Discovered',
-    batteryVoltage: 12.4,
-    lastSeenMs: Date.now(),
-    isAccessPointMode: false
-  },
-  {
-    id: 'cando-station-02',
-    name: 'CAN-Do Dongle (Station Mode)',
-    family: 'CAN-Do',
-    model: 'WiCAN OBD-II (ESP32-C3)',
-    ipAddress: '192.168.1.188',
-    tcpPort: 23,
-    protocol: 'GVRET_IP',
-    macAddress: 'DC:54:75:6A:9C:31',
-    hostname: 'cando.local',
-    firmwareVersion: 'CAN-Do (SuperSuave/can-do)',
-    rssi: -52,
-    channelCount: 1,
-    activeBitrate: 500000,
-    status: 'Discovered',
-    batteryVoltage: 13.8,
-    lastSeenMs: Date.now(),
-    isAccessPointMode: false
-  }
-];
+export const DEFAULT_DISCOVERABLE_DEVICES: DetectedDevice[] = [];
 
 export interface ScanOptions {
   subnet: string; // e.g. "192.168.4" or "192.168.1"

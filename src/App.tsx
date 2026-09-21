@@ -1,4 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
 import { Header } from './components/Header';
 import { NavigationRail } from './components/NavigationRail';
 import { LiveSnifferView } from './components/LiveSnifferView';
@@ -22,57 +25,17 @@ import { PlaybackStatusBar } from './components/PlaybackStatusBar';
 import { INITIAL_CONNECTIONS, INITIAL_DBC_MESSAGES, generateInitialCANFrames } from './data/mockData';
 import { CANFrame, ConnectionConfig, DBCMessage, ScriptItem, Bookmark, CANMessageTrigger } from './types';
 
-const INITIAL_CAN_TRIGGERS: CANMessageTrigger[] = [
-  {
-    id: 'trig-steering-btn',
-    name: 'Steering Wheel Button (Cruise/Media)',
-    enabled: true,
-    canId: '0x156',
-    targetByte: 1, // Byte D1
-    condition: 'equals',
-    expectedHex: '0x24',
-    maskHex: '0xFF',
-    autoDisableOnTrigger: false,
-    cooldownMs: 800,
-    notes: 'Triggered when steering wheel button is depressed (Byte D1 == 0x24)'
-  },
-  {
-    id: 'trig-brake-switch',
-    name: 'Brake Pedal Switch Active',
-    enabled: false,
-    canId: '0x201',
-    targetByte: 4, // Byte D4
-    condition: 'equals',
-    expectedHex: '0x02',
-    maskHex: '0xFF',
-    autoDisableOnTrigger: false,
-    cooldownMs: 1000,
-    notes: 'Brake switch contact closed (Byte D4 == 0x02)'
-  },
-  {
-    id: 'trig-abs-pulse',
-    name: 'ABS Wheel Slip Event',
-    enabled: false,
-    canId: '0x320',
-    targetByte: 5, // Byte D5
-    condition: 'equals',
-    expectedHex: '0x01',
-    maskHex: '0xFF',
-    autoDisableOnTrigger: true,
-    cooldownMs: 1500,
-    notes: 'ABS intervention flag detected on Byte D5'
-  }
-];
+const INITIAL_CAN_TRIGGERS: CANMessageTrigger[] = [];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('sniffer');
-  const [frames, setFrames] = useState<CANFrame[]>(() => generateInitialCANFrames());
+  const [frames, setFrames] = useState<CANFrame[]>([]);
   const [connections, setConnections] = useState<ConnectionConfig[]>(INITIAL_CONNECTIONS);
   const [dbcMessages, setDbcMessages] = useState<DBCMessage[]>(INITIAL_DBC_MESSAGES);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [canTriggers, setCanTriggers] = useState<CANMessageTrigger[]>(INITIAL_CAN_TRIGGERS);
   const [snifferFilterTerm, setSnifferFilterTerm] = useState('');
-  const [isCapturing, setIsCapturing] = useState(true);
+  const [isCapturing, setIsCapturing] = useState(false);
   const [isConnModalOpen, setIsConnModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -434,9 +397,16 @@ export default function App() {
     }
   };
 
-  // Live streaming CAN traffic simulation when isCapturing is active
+  // Live streaming CAN traffic simulation when isCapturing is active and device is connected
   useEffect(() => {
     if (!isCapturing) return;
+
+    const hasConnectedDevice = connections.some(c => c.status === 'Connected');
+    if (!hasConnectedDevice) {
+      setIsCapturing(false);
+      showToast('SavvyLens: Cannot start capture. No active hardware connection.');
+      return;
+    }
 
     const interval = setInterval(() => {
       const currentFrames = framesRef.current;
@@ -566,19 +536,68 @@ export default function App() {
     }
   };
 
-  const handleExportLogs = () => {
-    const csvContent = "data:text/csv;charset=utf-8," + 
-      ["Timestamp,Bus,Direction,ID,Name,DLC,Data"]
-      .concat(frames.map(f => `${f.timestamp},${f.bus},${f.direction || 'RX'},${f.id},${f.name || ''},${f.dlc},"${f.data.join(' ')}"`))
-      .join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `savvylens_export_${Date.now()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    showToast('SavvyLens: Exported trace logs to CSV');
+  const handleExportLogs = async () => {
+    const header = "Time Stamp,ID,Extended,Dir,Bus,LEN,D1,D2,D3,D4,D5,D6,D7,D8";
+    const rows = frames.map(f => {
+      const decId = f.decimalId || parseInt(f.id.replace('0x', ''), 16);
+      const isExtended = decId > 0x7FF;
+      const cleanId = f.id.replace('0x', '').toUpperCase();
+      const dir = f.direction || 'RX';
+      const bus = f.bus ?? 0;
+      const dlc = f.dlc ?? f.data.length;
+
+      const dataBytes: string[] = [];
+      for (let i = 0; i < 8; i++) {
+        if (i < f.data.length) {
+          dataBytes.push(f.data[i].toString(16).toUpperCase().padStart(2, '0'));
+        } else {
+          dataBytes.push('');
+        }
+      }
+
+      return [
+        f.timestamp.toFixed(6),
+        cleanId,
+        isExtended ? 'true' : 'false',
+        dir,
+        bus,
+        dlc,
+        ...dataBytes
+      ].join(',');
+    });
+
+    const csvContent = [header, ...rows].join("\n");
+    const fileName = `savvylens_export_${Date.now()}.csv`;
+
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const result = await Filesystem.writeFile({
+          path: fileName,
+          data: csvContent,
+          directory: Directory.Documents,
+          encoding: 'utf8' as any
+        });
+        await Share.share({
+          title: 'SavvyLens CAN Trace Log (SavvyCAN Format)',
+          text: `Exported ${frames.length} CAN frames in SavvyCAN format`,
+          url: result.uri,
+          dialogTitle: 'Share or Save CAN Log'
+        });
+        showToast('SavvyLens: Exported SavvyCAN-compatible log');
+      } catch (err) {
+        console.error('Filesystem / Share error:', err);
+        showToast('Error exporting file on mobile device');
+      }
+    } else {
+      const encodedUri = encodeURI("data:text/csv;charset=utf-8," + csvContent);
+      const link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", fileName);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      showToast('SavvyLens: Exported SavvyCAN-compatible trace log');
+    }
   };
 
   const handleImportLogs = () => {
@@ -685,7 +704,9 @@ export default function App() {
       )}
 
       <div className="flex flex-1 overflow-hidden">
-        <NavigationRail activeTab={activeTab} setActiveTab={setActiveTab} />
+        {activeTab !== 'mobile-companion' && (
+          <NavigationRail activeTab={activeTab} setActiveTab={setActiveTab} />
+        )}
 
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {activeTab === 'mobile-companion' && (
@@ -702,6 +723,7 @@ export default function App() {
               handleSendCustomFrame={handleSendCustomFrame}
               handleCreateBookmark={handleCreateBookmark}
               showToast={showToast}
+              setActiveTab={setActiveTab}
             />
           )}
           {activeTab === 'sniffer' && (
@@ -798,6 +820,7 @@ export default function App() {
               onConnectDevice={handleConnectDevice}
               onDisconnectDevice={handleDisconnectDevice}
               onNavigateToSniffer={() => setActiveTab('sniffer')}
+              onSwitchToMobile={() => setActiveTab('mobile-companion')}
             />
           )}
         </main>

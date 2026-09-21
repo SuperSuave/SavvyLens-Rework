@@ -66,7 +66,7 @@ export interface DetectedDevice {
 export interface ConnectionConfig {
   id: string;
   name: string;
-  type: 'GVRET' | 'GVRET_IP' | 'SocketCAN' | 'Lawicel' | 'MQTT' | 'Simulated';
+  type: 'GVRET' | 'GVRET_IP' | 'SocketCAN' | 'Lawicel' | 'MQTT';
   status: 'Connected' | 'Disconnected' | 'Connecting';
   baudRate: number;
   port: string;

@@ -20,7 +20,7 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
 }) => {
   const [modalTab, setModalTab] = useState<'auto_detect' | 'manual'>('auto_detect');
   const [newConnName, setNewConnName] = useState('');
-  const [newConnType, setNewConnType] = useState<'GVRET' | 'GVRET_IP' | 'SocketCAN' | 'Lawicel' | 'MQTT' | 'Simulated'>('GVRET_IP');
+  const [newConnType, setNewConnType] = useState<'GVRET' | 'GVRET_IP' | 'SocketCAN' | 'Lawicel' | 'MQTT'>('GVRET_IP');
   const [newPort, setNewPort] = useState('/dev/ttyUSB0');
   const [newIpAddress, setNewIpAddress] = useState('192.168.4.1');
   const [newTcpPort, setNewTcpPort] = useState(23);
@@ -203,7 +203,6 @@ export const ConnectionModal: React.FC<ConnectionModalProps> = ({
                       <option value="SocketCAN">SocketCAN (Linux)</option>
                       <option value="Lawicel">Lawicel / CANtact</option>
                       <option value="MQTT">MQTT CAN Bridge</option>
-                      <option value="Simulated">Simulated Bus</option>
                     </select>
                   </div>
                 </div>

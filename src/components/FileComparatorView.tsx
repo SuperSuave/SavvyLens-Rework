@@ -4,19 +4,14 @@ import { FileComparisonResult, CANFrame } from '../types';
 import { parseCanFile } from '../utils/logParser';
 
 export const FileComparatorView: React.FC = () => {
-  const [fileAName, setFileAName] = useState('ignition_off.csv');
-  const [fileBName, setFileBName] = useState('ignition_on.csv');
+  const [fileAName, setFileAName] = useState('');
+  const [fileBName, setFileBName] = useState('');
   const [framesA, setFramesA] = useState<CANFrame[]>([]);
   const [framesB, setFramesB] = useState<CANFrame[]>([]);
   const fileAInputRef = useRef<HTMLInputElement>(null);
   const fileBInputRef = useRef<HTMLInputElement>(null);
 
-  const [results, setResults] = useState<FileComparisonResult[]>([
-    { frameId: '0x123', name: 'EV_Inverter_Status', countA: 0, countB: 245, diffSummary: 'Appeared in File B (New active stream)' },
-    { frameId: '0x204', name: 'BMS_Cell_Summary', countA: 120, countB: 310, diffSummary: 'Frequency increased by 158%' },
-    { frameId: '0x318', name: 'BCM_Door_Status', countA: 45, countB: 45, diffSummary: 'Identical payload and frequency' },
-    { frameId: '0x550', name: 'Climate_Status', countA: 0, countB: 88, diffSummary: 'Only present in File B' },
-  ]);
+  const [results, setResults] = useState<FileComparisonResult[]>([]);
 
   const computeDiff = (aList: CANFrame[], bList: CANFrame[]) => {
     const countsA: Record<string, { count: number; name?: string; lastData?: number[] }> = {};

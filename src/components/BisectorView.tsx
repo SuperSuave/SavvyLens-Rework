@@ -3,16 +3,19 @@ import { GitBranch, CheckCircle2, XCircle, RotateCcw } from 'lucide-react';
 import { BisectorStep } from '../types';
 
 export const BisectorView: React.FC = () => {
-  const [steps, setSteps] = useState<BisectorStep[]>([
-    { step: 1, hypothesis: 'Test half of candidate IDs (0x000 - 0x3FF)', remainingCandidates: 1024, status: 'Confirmed' },
-    { step: 2, hypothesis: 'Test upper quartile (0x200 - 0x3FF)', remainingCandidates: 512, status: 'Confirmed' },
-    { step: 3, hypothesis: 'Test sub-range (0x280 - 0x2BF)', remainingCandidates: 64, status: 'Pending' },
-  ]);
+  const [steps, setSteps] = useState<BisectorStep[]>([]);
 
   const handleTestState = (confirmed: boolean) => {
+    if (steps.length === 0) {
+      setSteps([
+        { step: 1, hypothesis: 'Initial candidate space (0x000 - 0x7FF)', remainingCandidates: 2048, status: confirmed ? 'Confirmed' : 'Eliminated' },
+        { step: 2, hypothesis: 'Narrowed candidate search space (0x000 - 0x3FF)', remainingCandidates: 1024, status: 'Pending' }
+      ]);
+      return;
+    }
     setSteps(prev => [
       ...prev.map((s, idx) => idx === prev.length - 1 ? { ...s, status: confirmed ? 'Confirmed' : 'Eliminated' } as BisectorStep : s),
-      { step: prev.length + 1, hypothesis: `Narrowed candidate search space`, remainingCandidates: Math.max(8, Math.floor(prev[prev.length - 1].remainingCandidates / 2)), status: 'Pending' }
+      { step: prev.length + 1, hypothesis: `Narrowed candidate search space`, remainingCandidates: Math.max(4, Math.floor(prev[prev.length - 1].remainingCandidates / 2)), status: 'Pending' }
     ]);
   };
 
@@ -52,7 +55,7 @@ export const BisectorView: React.FC = () => {
             <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-3">
               <div className="flex justify-between text-xs">
                 <span className="text-slate-400">Remaining Candidates</span>
-                <span className="font-mono font-bold text-blue-400">{steps[steps.length - 1].remainingCandidates} IDs</span>
+                <span className="font-mono font-bold text-blue-400">{steps.length > 0 ? steps[steps.length - 1].remainingCandidates : 2048} IDs</span>
               </div>
               <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
                 <div className="bg-blue-600 h-full transition-all duration-300" style={{ width: `${Math.max(5, 100 - (steps.length * 15))}%` }} />
