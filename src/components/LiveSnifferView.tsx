@@ -17,6 +17,27 @@ import {
 import { ValueCorrelationModal } from './ValueCorrelationModal';
 import { describeBitDifference } from '../utils/baselineAnalysis';
 
+export interface SnifferIdRow {
+  id: string;
+  decimalId: number;
+  name?: string;
+  bus: number;
+  dlc: number;
+  data: number[];
+  prevData?: number[];
+  changedBytes: boolean[];
+  changedBits: number[];
+  byteDeltas: number[]; // 1 = increased (green), -1 = decreased (red), 0 = unchanged
+  timestamp: number;
+  lastDeltaSec: number;
+  periodMs: number;
+  freqHz: number;
+  count: number;
+  ascii: string;
+  isNewId?: boolean;
+  frame: CANFrame;
+}
+
 export interface MessageStateItem {
   frame: CANFrame;
   relativeOffset: number; // -5 to +5
@@ -74,6 +95,31 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
   const [isMappingTrigger, setIsMappingTrigger] = useState(false);
   const [mapByteChoice, setMapByteChoice] = useState<number>(1); // D1 - D8
   const [mapTriggerName, setMapTriggerName] = useState('');
+
+  // Performance Modes: 'sniffer' (Grouped by ID with Period/Freq/Notching) or 'trace' (Chronological virtualized stream)
+  const [viewMode, setViewMode] = useState<'sniffer' | 'trace'>('sniffer');
+  const [snifferSortBy, setSnifferSortBy] = useState<'id' | 'period' | 'count' | 'activity'>('id');
+  const [snifferSortAsc, setSnifferSortAsc] = useState<boolean>(true);
+  const [notchedBitsMap, setNotchedBitsMap] = useState<Map<string, number[]>>(new Map());
+
+  // Virtualization state for Trace mode (high-fps windowing for 100k+ frames on Windows)
+  const tableContainerRef = React.useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [containerHeight, setContainerHeight] = useState(600);
+  const [autoScroll, setAutoScroll] = useState(true);
+
+  React.useEffect(() => {
+    if (!tableContainerRef.current) return;
+    const observer = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        if (entry.contentRect.height > 0) {
+          setContainerHeight(entry.contentRect.height);
+        }
+      }
+    });
+    observer.observe(tableContainerRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   // SavvyLens Baseline & Latched Pulse Detection State
   const [baselineActive, setBaselineActive] = useState<boolean>(false);
@@ -279,17 +325,162 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
     });
   }, [frames, filterMode, searchTerm]);
 
-  // SavvyLens Signal Type Heuristic Analysis
+  // SavvyLens Aggregated Sniffer Engine (Grouped by Unique CAN ID with Period, Frequency, and Delta tracking)
+  const aggregatedSnifferRows = useMemo<SnifferIdRow[]>(() => {
+    const map = new Map<string, SnifferIdRow>();
+    const currentTime = frames.length > 0 ? frames[frames.length - 1].timestamp : 0;
+
+    for (let i = 0; i < frames.length; i++) {
+      const f = frames[i];
+      const existing = map.get(f.id);
+      if (!existing) {
+        map.set(f.id, {
+          id: f.id,
+          decimalId: f.decimalId,
+          name: f.name,
+          bus: f.bus,
+          dlc: f.dlc,
+          data: f.data,
+          prevData: f.prevData,
+          changedBytes: f.changedBytes || f.data.map(() => false),
+          changedBits: f.changedBits || f.data.map(() => 0),
+          byteDeltas: f.data.map(() => 0),
+          timestamp: f.timestamp,
+          lastDeltaSec: 0,
+          periodMs: f.periodMs || 0,
+          freqHz: f.periodMs && f.periodMs > 0 ? Math.round(1000 / f.periodMs) : 0,
+          count: f.count || 1,
+          ascii: f.ascii,
+          isNewId: f.isNewId,
+          frame: f
+        });
+      } else {
+        const deltaSec = f.timestamp - existing.timestamp;
+        const periodMs = deltaSec > 0 ? Number((deltaSec * 1000).toFixed(1)) : existing.periodMs;
+        const freqHz = periodMs > 0 ? Math.round(1000 / periodMs) : existing.freqHz;
+
+        const byteDeltas = f.data.map((b, idx) => {
+          const oldB = existing.data[idx];
+          if (oldB === undefined || oldB === b) return 0;
+          return b > oldB ? 1 : -1;
+        });
+
+        const changedBytes = f.data.map((b, idx) => existing.data[idx] !== b);
+        const changedBits = f.data.map((b, idx) => ((existing.data[idx] ?? 0) ^ b) & 0xFF);
+
+        existing.prevData = existing.data;
+        existing.data = f.data;
+        existing.changedBytes = changedBytes;
+        existing.changedBits = changedBits;
+        existing.byteDeltas = byteDeltas;
+        existing.timestamp = f.timestamp;
+        existing.periodMs = periodMs;
+        existing.freqHz = freqHz;
+        existing.count = (existing.count || 0) + 1;
+        existing.ascii = f.ascii;
+        existing.frame = f;
+        if (f.name && !existing.name) existing.name = f.name;
+      }
+    }
+
+    let list = Array.from(map.values()).map(r => ({
+      ...r,
+      lastDeltaSec: Number((currentTime - r.timestamp).toFixed(2))
+    }));
+
+    // Apply search filter
+    if (searchTerm.trim()) {
+      const term = searchTerm.trim().toLowerCase();
+      list = list.filter(r => 
+        r.id.toLowerCase().includes(term) ||
+        r.decimalId.toString().includes(term) ||
+        (r.name && r.name.toLowerCase().includes(term)) ||
+        r.data.map(b => b.toString(16).padStart(2, '0')).join('').includes(term.replace(/\s+/g, ''))
+      );
+    }
+
+    // Filter mode
+    if (filterMode === 'changed') {
+      list = list.filter(r => r.changedBytes.some(Boolean));
+    } else if (filterMode === 'new_ids') {
+      list = list.filter(r => r.isNewId);
+    }
+
+    // Sort
+    list.sort((a, b) => {
+      let diff = 0;
+      if (snifferSortBy === 'id') diff = a.decimalId - b.decimalId;
+      else if (snifferSortBy === 'period') diff = a.periodMs - b.periodMs;
+      else if (snifferSortBy === 'count') diff = a.count - b.count;
+      else if (snifferSortBy === 'activity') diff = a.lastDeltaSec - b.lastDeltaSec;
+      return snifferSortAsc ? diff : -diff;
+    });
+
+    return list;
+  }, [frames, searchTerm, filterMode, snifferSortBy, snifferSortAsc]);
+
+  // SavvyLens Trace Virtualization Calculation
+  const ROW_HEIGHT = 38;
+  const totalRows = filteredFrames.length;
+  const visibleCount = Math.ceil(containerHeight / ROW_HEIGHT);
+  const bufferCount = 8;
+  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - bufferCount);
+  const endIndex = Math.min(totalRows, Math.floor(scrollTop / ROW_HEIGHT) + visibleCount + bufferCount);
+  const visibleFrames = useMemo(() => {
+    return filteredFrames.slice(startIndex, endIndex);
+  }, [filteredFrames, startIndex, endIndex]);
+  const topPadding = startIndex * ROW_HEIGHT;
+  const bottomPadding = Math.max(0, (totalRows - endIndex) * ROW_HEIGHT);
+
+  // Auto-scroll handler for Trace mode
+  React.useEffect(() => {
+    if (viewMode === 'trace' && autoScroll && tableContainerRef.current) {
+      tableContainerRef.current.scrollTop = tableContainerRef.current.scrollHeight;
+    }
+  }, [frames.length, viewMode, autoScroll]);
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const target = e.currentTarget;
+    setScrollTop(target.scrollTop);
+    const isNearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 80;
+    if (!isNearBottom && autoScroll) {
+      setAutoScroll(false);
+    } else if (isNearBottom && !autoScroll) {
+      setAutoScroll(true);
+    }
+  };
+
+  const handleNotchAllActiveBits = () => {
+    setNotchedBitsMap(prev => {
+      const next = new Map(prev);
+      aggregatedSnifferRows.forEach(row => {
+        const existing = next.get(row.id) || new Array(row.data.length).fill(0);
+        const updated = row.data.map((_, idx) => (existing[idx] || 0) | (row.changedBits[idx] || 0));
+        next.set(row.id, updated);
+      });
+      return next;
+    });
+  };
+
+  const handleClearNotches = () => {
+    setNotchedBitsMap(new Map());
+  };
+
+  // SavvyLens Signal Type Heuristic Analysis (bounded to last 250 frames for instant speed)
   const signalAnalysis = useMemo<FrameSignalAnalysis | null>(() => {
     if (!selectedFrame) return null;
-    const framesForId = frames.filter(f => f.id.toLowerCase() === selectedFrame.id.toLowerCase());
+    const allMatching = frames.filter(f => f.id.toLowerCase() === selectedFrame.id.toLowerCase());
+    const framesForId = allMatching.length > 250 ? allMatching.slice(allMatching.length - 250) : allMatching;
     return analyzeFrameSignals(framesForId, selectedFrame);
   }, [selectedFrame, frames]);
 
-  // SavvyLens Surrounding Event Correlation Analysis
+  // SavvyLens Surrounding Event Correlation Analysis (bounded to +/- 5s window)
   const correlatedEvents = useMemo<CorrelatedEvent[]>(() => {
     if (!selectedFrame) return [];
-    return analyzeSurroundingCorrelations(frames, selectedFrame, correlationWindowMs);
+    const minTs = selectedFrame.timestamp - 5;
+    const maxTs = selectedFrame.timestamp + 5;
+    const boundedFrames = frames.filter(f => f.timestamp >= minTs && f.timestamp <= maxTs);
+    return analyzeSurroundingCorrelations(boundedFrames, selectedFrame, correlationWindowMs);
   }, [selectedFrame, frames, correlationWindowMs]);
 
   // SavvyLens Previous 5 and Next 5 States Computation
@@ -421,74 +612,105 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
             </div>
           </div>
 
-          {/* SavvyLens Quick Filter Pills */}
-          <div className="flex items-center space-x-1.5 bg-slate-950/80 p-1 rounded-xl border border-slate-800 text-xs">
-            <button
-              onClick={() => setFilterMode('all')}
-              className={`px-2.5 py-1 rounded-lg font-medium transition ${
-                filterMode === 'all' 
-                  ? 'bg-blue-600 text-white shadow-xs' 
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              All
-            </button>
-            <button
-              onClick={() => setFilterMode('changed')}
-              title="SavvyLens: Show only frames with changed data bytes/bits"
-              className={`px-2.5 py-1 rounded-lg font-medium flex items-center space-x-1 transition ${
-                filterMode === 'changed' 
-                  ? 'bg-amber-600 text-white shadow-xs' 
-                  : 'text-slate-400 hover:text-amber-300'
-              }`}
-            >
-              <Zap className="w-3 h-3" />
-              <span>Changed Bits</span>
-            </button>
-            <button
-              onClick={() => setFilterMode('new_ids')}
-              title="SavvyLens: Show only newly introduced CAN IDs"
-              className={`px-2.5 py-1 rounded-lg font-medium flex items-center space-x-1 transition ${
-                filterMode === 'new_ids' 
-                  ? 'bg-indigo-600 text-white shadow-xs' 
-                  : 'text-slate-400 hover:text-indigo-300'
-              }`}
-            >
-              <Sparkles className="w-3 h-3" />
-              <span>New IDs</span>
-            </button>
-            <button
-              onClick={() => setFilterMode('rx')}
-              className={`px-2 py-1 rounded-lg font-medium transition ${
-                filterMode === 'rx' 
-                  ? 'bg-emerald-600 text-white shadow-xs' 
-                  : 'text-slate-400 hover:text-emerald-300'
-              }`}
-            >
-              RX
-            </button>
-            <button
-              onClick={() => setFilterMode('diverged')}
-              title="SavvyLens: Show only CAN IDs with active pulses or baseline divergence"
-              className={`px-2.5 py-1 rounded-lg font-medium flex items-center space-x-1 transition ${
-                filterMode === 'diverged' 
-                  ? 'bg-rose-600 text-white shadow-xs' 
-                  : 'text-slate-400 hover:text-rose-300'
-              }`}
-            >
-              <Zap className="w-3 h-3" />
-              <span>Pulses / Diverged</span>
-            </button>
-            <button
-              onClick={() => setFilterMode('tx')}
-              className={`px-2 py-1 rounded-lg font-medium transition ${
-                filterMode === 'tx' 
-                  ? 'bg-amber-600 text-white shadow-xs' 
-                  : 'text-slate-400 hover:text-amber-300'
-              }`}
-            >
-              TX
-            </button>
+          {/* Performance View Mode Toggle & Quick Filter Pills */}
+          <div className="flex items-center space-x-2 flex-wrap gap-y-2">
+            {/* View Mode Switcher */}
+            <div className="flex items-center space-x-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
+              <button
+                onClick={() => setViewMode('sniffer')}
+                className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer ${
+                  viewMode === 'sniffer'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+                title="Sniffer Mode: Groups messages by unique CAN ID with period, frequency, and live delta highlights (SavvyCAN / cansniffer)"
+              >
+                <Radio className="w-3.5 h-3.5" />
+                <span>Sniffer (Grouped)</span>
+              </button>
+              <button
+                onClick={() => setViewMode('trace')}
+                className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer ${
+                  viewMode === 'trace'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+                title="Trace Mode: Chronological streaming log with virtualized smooth 60 FPS scrolling"
+              >
+                <History className="w-3.5 h-3.5" />
+                <span>Trace Stream</span>
+              </button>
+            </div>
+
+            {/* SavvyLens Quick Filter Pills */}
+            <div className="flex items-center space-x-1 bg-slate-950/80 p-1 rounded-xl border border-slate-800 text-xs">
+              <button
+                onClick={() => setFilterMode('all')}
+                className={`px-2.5 py-1 rounded-lg font-medium transition cursor-pointer ${
+                  filterMode === 'all' 
+                    ? 'bg-blue-600 text-white shadow-xs' 
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                All
+              </button>
+              <button
+                onClick={() => setFilterMode('changed')}
+                title="SavvyLens: Show only frames with changed data bytes/bits"
+                className={`px-2.5 py-1 rounded-lg font-medium flex items-center space-x-1 transition cursor-pointer ${
+                  filterMode === 'changed' 
+                    ? 'bg-amber-600 text-white shadow-xs' 
+                    : 'text-slate-400 hover:text-amber-300'
+                }`}
+              >
+                <Zap className="w-3 h-3" />
+                <span>Changed Bits</span>
+              </button>
+              <button
+                onClick={() => setFilterMode('new_ids')}
+                title="SavvyLens: Show only newly introduced CAN IDs"
+                className={`px-2.5 py-1 rounded-lg font-medium flex items-center space-x-1 transition cursor-pointer ${
+                  filterMode === 'new_ids' 
+                    ? 'bg-indigo-600 text-white shadow-xs' 
+                    : 'text-slate-400 hover:text-indigo-300'
+                }`}
+              >
+                <Sparkles className="w-3 h-3" />
+                <span>New IDs</span>
+              </button>
+              <button
+                onClick={() => setFilterMode('rx')}
+                className={`px-2 py-1 rounded-lg font-medium transition cursor-pointer ${
+                  filterMode === 'rx' 
+                    ? 'bg-emerald-600 text-white shadow-xs' 
+                    : 'text-slate-400 hover:text-emerald-300'
+                }`}
+              >
+                RX
+              </button>
+              <button
+                onClick={() => setFilterMode('diverged')}
+                title="SavvyLens: Show only CAN IDs with active pulses or baseline divergence"
+                className={`px-2.5 py-1 rounded-lg font-medium flex items-center space-x-1 transition cursor-pointer ${
+                  filterMode === 'diverged' 
+                    ? 'bg-rose-600 text-white shadow-xs' 
+                    : 'text-slate-400 hover:text-rose-300'
+                }`}
+              >
+                <Zap className="w-3 h-3" />
+                <span>Pulses / Diverged</span>
+              </button>
+              <button
+                onClick={() => setFilterMode('tx')}
+                className={`px-2 py-1 rounded-lg font-medium transition cursor-pointer ${
+                  filterMode === 'tx' 
+                    ? 'bg-amber-600 text-white shadow-xs' 
+                    : 'text-slate-400 hover:text-amber-300'
+                }`}
+              >
+                TX
+              </button>
+            </div>
           </div>
 
           {/* Actions & Toggles */}
@@ -606,131 +828,380 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
           </div>
         </div>
 
-        {/* CAN Data Grid Table with SavvyLens Bit/Byte Change Highlighting */}
-        <div className="flex-1 overflow-auto">
-          <table className="w-full text-left border-collapse font-mono text-xs">
-            <thead className="bg-slate-900/95 text-slate-400 sticky top-0 border-b border-slate-800 select-none z-10">
-              <tr>
-                <th className="py-2.5 px-3 font-medium">Timestamp</th>
-                <th className="py-2.5 px-3 font-medium">Bus</th>
-                <th className="py-2.5 px-3 font-medium">Dir</th>
-                <th className="py-2.5 px-3 font-medium">CAN ID</th>
-                <th className="py-2.5 px-3 font-medium">Message Name</th>
-                <th className="py-2.5 px-3 font-medium">DLC</th>
-                <th className="py-2.5 px-3 font-medium">Data Bytes (D1–D8)</th>
-                <th className="py-2.5 px-3 font-medium">ASCII</th>
-                <th className="py-2.5 px-3 font-medium text-right">Count</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-900">
-              {filteredFrames.length === 0 ? (
+        {/* Mode-Specific Action Bar (Notching, Sorting, Auto-scroll, Row Telemetry) */}
+        <div className="px-3 py-1.5 bg-slate-900/90 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+          {viewMode === 'sniffer' ? (
+            <>
+              <div className="flex items-center space-x-2">
+                <span className="text-slate-400 font-medium">SavvyCAN Notcher:</span>
+                <button
+                  onClick={handleNotchAllActiveBits}
+                  className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg font-medium flex items-center space-x-1.5 transition cursor-pointer"
+                  title="Snapshot all currently toggling bits to eliminate background bus noise (cansniffer notch)"
+                >
+                  <Filter className="w-3 h-3 text-amber-400" />
+                  <span>Notch Active Bits</span>
+                </button>
+                {notchedBitsMap.size > 0 && (
+                  <button
+                    onClick={handleClearNotches}
+                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg text-[11px] transition cursor-pointer"
+                  >
+                    Reset Notches ({notchedBitsMap.size} IDs)
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center space-x-3">
+                <div className="flex items-center space-x-1.5">
+                  <span className="text-slate-400">Sort by:</span>
+                  <select
+                    value={snifferSortBy}
+                    onChange={(e) => setSnifferSortBy(e.target.value as any)}
+                    className="bg-slate-950 border border-slate-800 text-white rounded-lg px-2 py-0.5 text-xs font-mono focus:outline-hidden cursor-pointer"
+                  >
+                    <option value="id">CAN ID (Hex)</option>
+                    <option value="period">Period (Cycle Time)</option>
+                    <option value="count">Message Count</option>
+                    <option value="activity">Last Active (Recency)</option>
+                  </select>
+                  <button
+                    onClick={() => setSnifferSortAsc(!snifferSortAsc)}
+                    className="p-1 bg-slate-950 border border-slate-800 text-slate-300 hover:text-white rounded-lg cursor-pointer"
+                    title={snifferSortAsc ? 'Ascending (Click for Descending)' : 'Descending (Click for Ascending)'}
+                  >
+                    {snifferSortAsc ? '▲' : '▼'}
+                  </button>
+                </div>
+                <span className="px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/30 font-mono text-[11px]">
+                  {aggregatedSnifferRows.length} Unique CAN IDs
+                </span>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center space-x-2">
+                <span className="text-slate-400 font-medium">Trace Controls:</span>
+                <button
+                  onClick={() => setAutoScroll(!autoScroll)}
+                  className={`px-2.5 py-1 rounded-lg font-medium flex items-center space-x-1.5 border transition cursor-pointer ${
+                    autoScroll
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                  }`}
+                  title={autoScroll ? 'Streaming live (Click to pause follow)' : 'Auto-scroll paused (Click to follow live)'}
+                >
+                  <span className={`w-2 h-2 rounded-full ${autoScroll ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                  <span>{autoScroll ? 'Auto-Scroll ON' : 'Auto-Scroll PAUSED'}</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (tableContainerRef.current) {
+                      tableContainerRef.current.scrollTop = 0;
+                      setAutoScroll(false);
+                    }
+                  }}
+                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[11px] transition cursor-pointer"
+                >
+                  Jump to Top
+                </button>
+                <button
+                  onClick={() => {
+                    if (tableContainerRef.current) {
+                      tableContainerRef.current.scrollTop = tableContainerRef.current.scrollHeight;
+                      setAutoScroll(true);
+                    }
+                  }}
+                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[11px] transition cursor-pointer"
+                >
+                  Jump to Latest
+                </button>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <span className="text-slate-500 text-[11px] font-sans">
+                  Windowed View (60 FPS on Windows):
+                </span>
+                <span className="px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/30 font-mono text-[11px]">
+                  Rendering {visibleFrames.length} of {filteredFrames.length.toLocaleString()} frames
+                </span>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Dynamic Display: Sniffer Mode (Grouped by ID) or Trace Mode (Virtualized Chronological Stream) */}
+        {viewMode === 'sniffer' ? (
+          <div className="flex-1 overflow-auto">
+            <table className="w-full text-left border-collapse font-mono text-xs">
+              <thead className="bg-slate-900/95 text-slate-400 sticky top-0 border-b border-slate-800 select-none z-10">
                 <tr>
-                  <td colSpan={9} className="text-center py-16 text-slate-500 font-sans">
-                    <div className="max-w-md mx-auto space-y-2">
-                      <p className="font-medium text-slate-400">No CAN frames match current filter.</p>
-                      <p className="text-xs text-slate-500">
-                        Connect hardware, transmit a test frame, or adjust search criteria.
-                      </p>
-                    </div>
-                  </td>
+                  <th className="py-2.5 px-3 font-medium">CAN ID</th>
+                  <th className="py-2.5 px-3 font-medium">Message Name</th>
+                  <th className="py-2.5 px-3 font-medium">Bus</th>
+                  <th className="py-2.5 px-3 font-medium">DLC</th>
+                  <th className="py-2.5 px-3 font-medium">Data Bytes (D1–D8) with Live Deltas</th>
+                  <th className="py-2.5 px-3 font-medium">ASCII</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Period</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Freq</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Count</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Age</th>
                 </tr>
-              ) : (
-                filteredFrames.map((frame, idx) => {
-                  const isSelected = selectedFrame?.id === frame.id && selectedFrame?.timestamp === frame.timestamp;
-                  return (
-                    <tr 
-                      key={`${frame.id}-${frame.timestamp}-${idx}`}
-                      onClick={() => setSelectedFrame(frame)}
-                      className={`cursor-pointer transition-colors ${
-                        isSelected 
-                          ? 'bg-blue-600/20 border-l-2 border-blue-500' 
-                          : 'hover:bg-slate-900/60'
-                      }`}
-                    >
-                      <td className="py-2 px-3 text-slate-400">+{frame.timestamp.toFixed(3)}s</td>
-                      <td className="py-2 px-3 text-slate-300">can{frame.bus}</td>
-                      <td className="py-2 px-3">
-                        {frame.direction === 'TX' ? (
-                          <span className="flex items-center text-amber-400 font-bold"><ArrowUpRight className="w-3 h-3 mr-0.5" /> TX</span>
-                        ) : (
-                          <span className="flex items-center text-emerald-400 font-medium"><ArrowDownLeft className="w-3 h-3 mr-0.5" /> RX</span>
-                        )}
-                      </td>
-                      <td className="py-2 px-3 font-bold text-blue-400 flex items-center space-x-1.5">
-                        <span>{frame.id}</span>
-                        {frame.isNewId && (
-                          <span className="text-[9px] font-sans px-1 py-0.2 bg-indigo-500/30 text-indigo-200 border border-indigo-500/40 rounded font-semibold">
-                            NEW
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-2 px-3 text-slate-200 font-sans font-medium">{frame.name || 'Unknown'}</td>
-                      <td className="py-2 px-3 text-slate-400">{frame.dlc}</td>
+              </thead>
+              <tbody className="divide-y divide-slate-900">
+                {aggregatedSnifferRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="text-center py-16 text-slate-500 font-sans">
+                      <div className="max-w-md mx-auto space-y-2">
+                        <p className="font-medium text-slate-400">No CAN IDs match current filter.</p>
+                        <p className="text-xs text-slate-500">
+                          Connect hardware, transmit a test frame, or adjust search criteria.
+                        </p>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  aggregatedSnifferRows.map((row) => {
+                    const isSelected = selectedFrame?.id === row.id;
+                    const notchedMask = notchedBitsMap.get(row.id);
 
-                      {/* SavvyLens Byte D1-D8 & Bit Change Highlighting & Latched Pulses */}
-                      <td className="py-2 px-3 tracking-wider">
-                        <div className="flex items-center space-x-1.5 font-mono">
-                          {frame.data.map((byte, bIdx) => {
-                            const isChanged = highlightChanges && frame.changedBytes?.[bIdx];
-                            const hexStr = byte.toString(16).toUpperCase().padStart(2, '0');
-                            const pulse = latchedPulses.get(`${frame.id}_D${bIdx}`);
-                            const base = baselineMap.get(frame.id);
-                            const baseVal = base?.baselineData[bIdx];
-                            const isDeviating = baselineActive && baseVal !== undefined && baseVal !== byte;
+                    return (
+                      <tr
+                        key={row.id}
+                        onClick={() => setSelectedFrame(row.frame)}
+                        className={`cursor-pointer transition-colors ${
+                          isSelected 
+                            ? 'bg-blue-600/20 border-l-2 border-blue-500' 
+                            : 'hover:bg-slate-900/60'
+                        }`}
+                      >
+                        <td className="py-2 px-3 font-bold text-blue-400 flex items-center space-x-1.5">
+                          <span>{row.id}</span>
+                          {row.isNewId && (
+                            <span className="text-[9px] font-sans px-1 py-0.2 bg-indigo-500/30 text-indigo-200 border border-indigo-500/40 rounded font-semibold">
+                              NEW
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 text-slate-200 font-sans font-medium">{row.name || 'Unknown'}</td>
+                        <td className="py-2 px-3 text-slate-300">can{row.bus}</td>
+                        <td className="py-2 px-3 text-slate-400">{row.dlc}</td>
 
-                            return (
-                              <div
-                                key={bIdx}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setCorrelatorFrame(frame);
-                                  setCorrelatorByteIdx(bIdx);
-                                  setCorrelatorOpen(true);
-                                }}
-                                title={
-                                  pulse 
-                                    ? `Latched Pulse: Base 0x${pulse.baselineVal.toString(16).padStart(2, '0')} ➔ Peak 0x${pulse.peakVal.toString(16).padStart(2, '0')} ➔ Cur 0x${pulse.currentVal.toString(16).padStart(2, '0')} (${describeBitDifference(pulse.baselineVal, pulse.peakVal)})\nClick to correlate with state echo`
-                                    : isChanged 
-                                    ? `Byte D${bIdx + 1} changed! Prev: 0x${(frame.prevData?.[bIdx] ?? byte).toString(16).toUpperCase().padStart(2, '0')}\nClick to find command/state echoes` 
-                                    : `Byte D${bIdx + 1}: 0x${hexStr}\nClick to find command/state echoes`
-                                }
-                                className={`px-1.5 py-0.5 rounded transition inline-flex flex-col items-center cursor-pointer relative group ${
-                                  pulse
-                                    ? 'bg-amber-500/30 text-amber-200 font-bold border border-amber-500/80 shadow-xs ring-1 ring-amber-500/40'
-                                    : isDeviating
-                                    ? 'bg-rose-500/25 text-rose-200 font-bold border border-rose-500/50'
-                                    : isChanged
-                                    ? 'bg-amber-500/25 text-amber-300 font-bold border border-amber-500/40 shadow-xs'
-                                    : 'text-slate-300 bg-slate-950/40 border border-slate-800/40 hover:border-blue-500/50 hover:text-white'
-                                }`}
-                              >
-                                <div className="flex items-center space-x-1">
-                                  <span className="text-[8px] text-slate-500 font-sans leading-none pb-0.5 select-none">D{bIdx + 1}</span>
-                                  {pulse && (
-                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping inline-block" />
+                        {/* Sniffer Payload with Live Byte Deltas & Notching */}
+                        <td className="py-2 px-3 tracking-wider">
+                          <div className="flex items-center space-x-1.5 font-mono">
+                            {row.data.map((byte, bIdx) => {
+                              const delta = row.byteDeltas[bIdx] ?? 0;
+                              const hexStr = byte.toString(16).toUpperCase().padStart(2, '0');
+                              const pulse = latchedPulses.get(`${row.id}_D${bIdx}`);
+                              const base = baselineMap.get(row.id);
+                              const baseVal = base?.baselineData[bIdx];
+                              const isDeviating = baselineActive && baseVal !== undefined && baseVal !== byte;
+                              const isByteNotched = notchedMask && ((notchedMask[bIdx] || 0) & 0xFF) !== 0;
+
+                              let colorClass = 'text-slate-300 bg-slate-950/40 border-slate-800/40 hover:border-blue-500/50 hover:text-white';
+                              if (pulse) {
+                                colorClass = 'bg-amber-500/30 text-amber-200 font-bold border-amber-500/80 shadow-xs ring-1 ring-amber-500/40';
+                              } else if (isDeviating) {
+                                colorClass = 'bg-rose-500/25 text-rose-200 font-bold border-rose-500/50';
+                              } else if (highlightChanges && delta > 0) {
+                                colorClass = 'bg-emerald-500/25 text-emerald-300 font-bold border-emerald-500/50 shadow-xs';
+                              } else if (highlightChanges && delta < 0) {
+                                colorClass = 'bg-rose-500/25 text-rose-300 font-bold border-rose-500/50 shadow-xs';
+                              } else if (isByteNotched) {
+                                colorClass = 'text-slate-600 bg-slate-950/20 border-slate-900/30 opacity-60';
+                              }
+
+                              return (
+                                <div
+                                  key={bIdx}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setCorrelatorFrame(row.frame);
+                                    setCorrelatorByteIdx(bIdx);
+                                    setCorrelatorOpen(true);
+                                  }}
+                                  title={
+                                    pulse
+                                      ? `Latched Pulse: Base 0x${pulse.baselineVal.toString(16).padStart(2, '0')} ➔ Peak 0x${pulse.peakVal.toString(16).padStart(2, '0')}\nClick to correlate`
+                                      : delta !== 0
+                                      ? `Byte D${bIdx + 1}: 0x${hexStr} (${delta > 0 ? '+Increased' : '-Decreased'})\nPrev: 0x${(row.prevData?.[bIdx] ?? byte).toString(16).toUpperCase().padStart(2, '0')}\nClick to correlate`
+                                      : `Byte D${bIdx + 1}: 0x${hexStr}\nClick to correlate`
+                                  }
+                                  className={`px-1.5 py-0.5 rounded border transition inline-flex flex-col items-center cursor-pointer relative group ${colorClass}`}
+                                >
+                                  <div className="flex items-center space-x-1">
+                                    <span className="text-[8px] text-slate-500 font-sans leading-none pb-0.5 select-none">D{bIdx + 1}</span>
+                                    {pulse && (
+                                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping inline-block" />
+                                    )}
+                                  </div>
+                                  <span className="leading-none text-[11px]">{hexStr}</span>
+                                  {delta !== 0 && (
+                                    <span className={`text-[8px] font-bold leading-none mt-0.5 ${delta > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                      {delta > 0 ? '+' : '-'}
+                                    </span>
                                   )}
                                 </div>
-                                <span className="leading-none text-[11px]">{hexStr}</span>
-                                {pulse && (
-                                  <span className="text-[8px] text-amber-300 font-bold leading-none mt-0.5">
-                                    Δ{pulse.peakVal.toString(16).toUpperCase().padStart(2, '0')}
-                                  </span>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </td>
+                              );
+                            })}
+                          </div>
+                        </td>
 
-                      <td className="py-2 px-3 text-slate-400 font-sans">{frame.ascii}</td>
-                      <td className="py-2 px-3 text-right text-slate-400">{frame.count}</td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                        <td className="py-2 px-3 text-slate-400 font-sans">{row.ascii}</td>
+                        <td className="py-2 px-3 text-right text-slate-300 font-mono">{row.periodMs > 0 ? `${row.periodMs.toFixed(1)}ms` : '—'}</td>
+                        <td className="py-2 px-3 text-right text-slate-300 font-mono">{row.freqHz > 0 ? `${row.freqHz}Hz` : '—'}</td>
+                        <td className="py-2 px-3 text-right text-slate-400">{row.count.toLocaleString()}</td>
+                        <td className="py-2 px-3 text-right text-slate-500 font-mono text-[11px]">
+                          {row.lastDeltaSec < 1 ? '<1s' : `${row.lastDeltaSec.toFixed(1)}s`}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          /* TRACE VIEW: Virtualized Chronological 60 FPS Stream */
+          <div ref={tableContainerRef} onScroll={handleScroll} className="flex-1 overflow-auto">
+            <table className="w-full text-left border-collapse font-mono text-xs">
+              <thead className="bg-slate-900/95 text-slate-400 sticky top-0 border-b border-slate-800 select-none z-10">
+                <tr>
+                  <th className="py-2.5 px-3 font-medium">Timestamp</th>
+                  <th className="py-2.5 px-3 font-medium">Bus</th>
+                  <th className="py-2.5 px-3 font-medium">Dir</th>
+                  <th className="py-2.5 px-3 font-medium">CAN ID</th>
+                  <th className="py-2.5 px-3 font-medium">Message Name</th>
+                  <th className="py-2.5 px-3 font-medium">DLC</th>
+                  <th className="py-2.5 px-3 font-medium">Data Bytes (D1–D8)</th>
+                  <th className="py-2.5 px-3 font-medium">ASCII</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Count</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-900">
+                {filteredFrames.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="text-center py-16 text-slate-500 font-sans">
+                      <div className="max-w-md mx-auto space-y-2">
+                        <p className="font-medium text-slate-400">No CAN frames match current filter.</p>
+                        <p className="text-xs text-slate-500">
+                          Connect hardware, transmit a test frame, or adjust search criteria.
+                        </p>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  <>
+                    {topPadding > 0 && (
+                      <tr style={{ height: `${topPadding}px` }}>
+                        <td colSpan={9} className="p-0 border-0" />
+                      </tr>
+                    )}
+                    {visibleFrames.map((frame, idx) => {
+                      const isSelected = selectedFrame?.id === frame.id && selectedFrame?.timestamp === frame.timestamp;
+                      return (
+                        <tr 
+                          key={`${frame.id}-${frame.timestamp}-${startIndex + idx}`}
+                          onClick={() => setSelectedFrame(frame)}
+                          className={`cursor-pointer transition-colors ${
+                            isSelected 
+                              ? 'bg-blue-600/20 border-l-2 border-blue-500' 
+                              : 'hover:bg-slate-900/60'
+                          }`}
+                        >
+                          <td className="py-2 px-3 text-slate-400">+{frame.timestamp.toFixed(3)}s</td>
+                          <td className="py-2 px-3 text-slate-300">can{frame.bus}</td>
+                          <td className="py-2 px-3">
+                            {frame.direction === 'TX' ? (
+                              <span className="flex items-center text-amber-400 font-bold"><ArrowUpRight className="w-3 h-3 mr-0.5" /> TX</span>
+                            ) : (
+                              <span className="flex items-center text-emerald-400 font-medium"><ArrowDownLeft className="w-3 h-3 mr-0.5" /> RX</span>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 font-bold text-blue-400 flex items-center space-x-1.5">
+                            <span>{frame.id}</span>
+                            {frame.isNewId && (
+                              <span className="text-[9px] font-sans px-1 py-0.2 bg-indigo-500/30 text-indigo-200 border border-indigo-500/40 rounded font-semibold">
+                                NEW
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 text-slate-200 font-sans font-medium">{frame.name || 'Unknown'}</td>
+                          <td className="py-2 px-3 text-slate-400">{frame.dlc}</td>
+
+                          {/* SavvyLens Byte D1-D8 & Bit Change Highlighting & Latched Pulses */}
+                          <td className="py-2 px-3 tracking-wider">
+                            <div className="flex items-center space-x-1.5 font-mono">
+                              {frame.data.map((byte, bIdx) => {
+                                const isChanged = highlightChanges && frame.changedBytes?.[bIdx];
+                                const hexStr = byte.toString(16).toUpperCase().padStart(2, '0');
+                                const pulse = latchedPulses.get(`${frame.id}_D${bIdx}`);
+                                const base = baselineMap.get(frame.id);
+                                const baseVal = base?.baselineData[bIdx];
+                                const isDeviating = baselineActive && baseVal !== undefined && baseVal !== byte;
+
+                                return (
+                                  <div
+                                    key={bIdx}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setCorrelatorFrame(frame);
+                                      setCorrelatorByteIdx(bIdx);
+                                      setCorrelatorOpen(true);
+                                    }}
+                                    title={
+                                      pulse 
+                                        ? `Latched Pulse: Base 0x${pulse.baselineVal.toString(16).padStart(2, '0')} ➔ Peak 0x${pulse.peakVal.toString(16).padStart(2, '0')} ➔ Cur 0x${pulse.currentVal.toString(16).padStart(2, '0')} (${describeBitDifference(pulse.baselineVal, pulse.peakVal)})\nClick to correlate with state echo`
+                                        : isChanged 
+                                        ? `Byte D${bIdx + 1} changed! Prev: 0x${(frame.prevData?.[bIdx] ?? byte).toString(16).toUpperCase().padStart(2, '0')}\nClick to find command/state echoes` 
+                                        : `Byte D${bIdx + 1}: 0x${hexStr}\nClick to find command/state echoes`
+                                    }
+                                    className={`px-1.5 py-0.5 rounded transition inline-flex flex-col items-center cursor-pointer relative group ${
+                                      pulse
+                                        ? 'bg-amber-500/30 text-amber-200 font-bold border border-amber-500/80 shadow-xs ring-1 ring-amber-500/40'
+                                        : isDeviating
+                                        ? 'bg-rose-500/25 text-rose-200 font-bold border border-rose-500/50'
+                                        : isChanged
+                                        ? 'bg-amber-500/25 text-amber-300 font-bold border border-amber-500/40 shadow-xs'
+                                        : 'text-slate-300 bg-slate-950/40 border border-slate-800/40 hover:border-blue-500/50 hover:text-white'
+                                    }`}
+                                  >
+                                    <div className="flex items-center space-x-1">
+                                      <span className="text-[8px] text-slate-500 font-sans leading-none pb-0.5 select-none">D{bIdx + 1}</span>
+                                      {pulse && (
+                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping inline-block" />
+                                      )}
+                                    </div>
+                                    <span className="leading-none text-[11px]">{hexStr}</span>
+                                    {pulse && (
+                                      <span className="text-[8px] text-amber-300 font-bold leading-none mt-0.5">
+                                        Δ{pulse.peakVal.toString(16).toUpperCase().padStart(2, '0')}
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </td>
+
+                          <td className="py-2 px-3 text-slate-400 font-sans">{frame.ascii}</td>
+                          <td className="py-2 px-3 text-right text-slate-400">{frame.count}</td>
+                        </tr>
+                      );
+                    })}
+                    {bottomPadding > 0 && (
+                      <tr style={{ height: `${bottomPadding}px` }}>
+                        <td colSpan={9} className="p-0 border-0" />
+                      </tr>
+                    )}
+                  </>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* SavvyLens Frame Inspector: Multi-Tab reverse engineering panel */}

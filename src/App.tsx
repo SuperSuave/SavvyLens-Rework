@@ -84,6 +84,35 @@ export default function App() {
     triggerCondition: 'any_new_id'
   });
 
+  // High-performance Buffer Limit & Message Rate tracking for Windows/Heavy captures
+  const [bufferLimit, setBufferLimit] = useState<number>(50000);
+  const [messageRate, setMessageRate] = useState<number>(0);
+  const frameCountWindowRef = useRef<{ count: number; lastTime: number }>({ count: 0, lastTime: Date.now() });
+
+  // O(1) Last Frame Lookup Map by CAN ID (eliminates O(N) array clone and reverse search)
+  const lastFrameByIdRef = useRef<Map<string, CANFrame>>(new Map());
+
+  // Populate O(1) map from initial frames
+  useEffect(() => {
+    frames.forEach(f => {
+      lastFrameByIdRef.current.set(f.id.toLowerCase(), f);
+    });
+  }, []);
+
+  // Periodic Message Rate calculation (1Hz update)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const elapsedSec = (now - frameCountWindowRef.current.lastTime) / 1000;
+      if (elapsedSec >= 0.8) {
+        const rate = Math.round(frameCountWindowRef.current.count / elapsedSec);
+        setMessageRate(rate);
+        frameCountWindowRef.current = { count: 0, lastTime: now };
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   const framesRef = useRef(frames);
   framesRef.current = frames;
 
@@ -101,6 +130,7 @@ export default function App() {
   };
 
   const handleClearFrames = () => {
+    lastFrameByIdRef.current.clear();
     setFrames([]);
     showToast('SavvyLens: Frame buffer cleared');
   };
@@ -250,7 +280,7 @@ export default function App() {
       data[0] = expectedByte;
     }
 
-    const lastMatch = [...currentFrames].reverse().find(f => f.id.toLowerCase() === trigger.canId.toLowerCase());
+    const lastMatch = lastFrameByIdRef.current.get(trigger.canId.toLowerCase());
     const changedBytes = data.map((b, i) => !lastMatch || lastMatch.data[i] !== b);
     const changedBits = data.map((b, i) => lastMatch ? ((lastMatch.data[i] ^ b) & 0xFF) : 0);
 
@@ -271,9 +301,12 @@ export default function App() {
       isNewId: !lastMatch
     };
 
+    lastFrameByIdRef.current.set(simFrame.id.toLowerCase(), simFrame);
+    frameCountWindowRef.current.count += 1;
+
     setFrames(prev => {
       const next = [...prev, simFrame];
-      return next.length > 500 ? next.slice(next.length - 500) : next;
+      return bufferLimit > 0 && next.length > bufferLimit ? next.slice(next.length - bufferLimit) : next;
     });
 
     evaluateFrameForTriggers(simFrame);
@@ -340,7 +373,7 @@ export default function App() {
         data = [spd, spd, spd, spd, 0x01, 0x00, 0x00, (spd ^ 0xFE) & 0xFF];
       }
 
-      const lastMatch = [...currentFrames].reverse().find(f => f.id === id);
+      const lastMatch = lastFrameByIdRef.current.get(id.toLowerCase());
       const changedBytes = data.map((b, i) => !lastMatch || lastMatch.data[i] !== b);
       const changedBits = data.map((b, i) => lastMatch ? ((lastMatch.data[i] ^ b) & 0xFF) : 0);
 
@@ -361,9 +394,12 @@ export default function App() {
         isNewId: !lastMatch
       };
 
+      lastFrameByIdRef.current.set(newFrame.id.toLowerCase(), newFrame);
+      frameCountWindowRef.current.count += 1;
+
       setFrames(prev => {
         const next = [...prev, newFrame];
-        return next.length > 500 ? next.slice(next.length - 500) : next;
+        return bufferLimit > 0 && next.length > bufferLimit ? next.slice(next.length - bufferLimit) : next;
       });
 
       // Evaluate simulated traffic against mapped CAN triggers
@@ -371,15 +407,15 @@ export default function App() {
     }, 500);
 
     return () => clearInterval(interval);
-  }, [isCapturing]);
+  }, [isCapturing, bufferLimit]);
 
   // Handle Transmitting Frame with SavvyLens Bit & Byte Change Tracking
   const handleSendCustomFrame = (id: string, data: number[]) => {
     const decId = parseInt(id.replace('0x', ''), 16);
     const prevFrames = framesRef.current;
     
-    // Find previous frame with identical ID to compute changed bits & bytes
-    const lastMatchingFrame = [...prevFrames].reverse().find(f => f.id.toLowerCase() === id.toLowerCase());
+    // O(1) Lookup of previous frame with identical ID
+    const lastMatchingFrame = lastFrameByIdRef.current.get(id.toLowerCase());
     
     const isNewId = !lastMatchingFrame;
     const changedBytes = data.map((byte, idx) => {
@@ -410,7 +446,13 @@ export default function App() {
       isNewId
     };
 
-    setFrames(prev => [...prev, newFrame]);
+    lastFrameByIdRef.current.set(newFrame.id.toLowerCase(), newFrame);
+    frameCountWindowRef.current.count += 1;
+
+    setFrames(prev => {
+      const next = [...prev, newFrame];
+      return bufferLimit > 0 && next.length > bufferLimit ? next.slice(next.length - bufferLimit) : next;
+    });
     evaluateFrameForTriggers(newFrame);
 
     // Check SavvyLens Auto-Arm Trigger conditions
@@ -460,11 +502,17 @@ export default function App() {
     });
 
     if (replace) {
+      lastFrameByIdRef.current.clear();
+      enriched.forEach(f => lastFrameByIdRef.current.set(f.id.toLowerCase(), f));
       setFrames(enriched);
-      showToast(`SavvyLens: Loaded ${enriched.length} CAN frames (Buffer Replaced)`);
+      showToast(`SavvyLens: Loaded ${enriched.length.toLocaleString()} CAN frames (Buffer Replaced)`);
     } else {
-      setFrames(prev => [...prev, ...enriched]);
-      showToast(`SavvyLens: Appended ${enriched.length} CAN frames to feed`);
+      enriched.forEach(f => lastFrameByIdRef.current.set(f.id.toLowerCase(), f));
+      setFrames(prev => {
+        const next = [...prev, ...enriched];
+        return bufferLimit > 0 && next.length > bufferLimit ? next.slice(next.length - bufferLimit) : next;
+      });
+      showToast(`SavvyLens: Appended ${enriched.length.toLocaleString()} CAN frames to feed`);
     }
   };
 
@@ -529,6 +577,9 @@ export default function App() {
         onExportLogs={handleExportLogs}
         onImportLogs={handleImportLogs}
         frameCount={frames.length}
+        bufferLimit={bufferLimit}
+        onBufferLimitChange={setBufferLimit}
+        messageRate={messageRate}
       />
 
       {/* Floating Notification Toast */}
