@@ -1,7 +1,11 @@
 {
-  "name": "savvylens-web",
+  "name": "savvylens",
   "private": true,
   "version": "1.0.0",
+  "author": {
+    "name": "SuperSuave",
+    "email": "21092088+SuperSuave@users.noreply.github.com"
+  },
   "main": "electron/main.cjs",
   "type": "module",
   "scripts": {

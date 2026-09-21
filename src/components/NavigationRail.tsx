@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { 
   Layers, Database, LineChart, Send, Code, Cpu, Shield, Zap, 
-  GitBranch, GitCompare, Bookmark, Network, ChevronLeft, ChevronRight, Activity 
+  GitBranch, GitCompare, Bookmark, Network, ChevronLeft, ChevronRight, Activity, Wifi 
 } from 'lucide-react';
+import { SavvyLensLogo } from './SavvyLensLogo';
 
 interface NavigationRailProps {
   activeTab: string;
@@ -42,11 +43,18 @@ export const NavigationRail: React.FC<NavigationRailProps> = ({
       }`}
     >
       {/* Top Header & Collapse Toggle */}
-      <div className={`flex items-center mb-2 pb-2 border-b border-slate-800/80 ${isCollapsed ? 'justify-center' : 'justify-between px-2'}`}>
-        {!isCollapsed && (
-          <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-            Workspace
-          </span>
+      <div className={`flex items-center mb-2 pb-2 border-b border-slate-800/80 ${isCollapsed ? 'flex-col space-y-2' : 'justify-between px-1'}`}>
+        {!isCollapsed ? (
+          <div className="flex items-center space-x-2">
+            <SavvyLensLogo size={22} />
+            <span className="text-xs font-semibold text-slate-300 tracking-wide">
+              Modules
+            </span>
+          </div>
+        ) : (
+          <div className="py-1 flex justify-center">
+            <SavvyLensLogo size={24} />
+          </div>
         )}
         <button
           id="collapse-sidebar-toggle-btn"

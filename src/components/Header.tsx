@@ -1,6 +1,7 @@
 import React from 'react';
 import { Activity, Radio, Download, Upload, Settings, Play, Pause, RefreshCw, Cpu } from 'lucide-react';
 import { ConnectionConfig } from '../types';
+import { SavvyLensLogo } from './SavvyLensLogo';
 
 interface HeaderProps {
   activeTab: string;
@@ -30,15 +31,13 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white px-4 py-3 flex flex-wrap items-center justify-between gap-4 select-none">
       <div className="flex items-center space-x-3">
-        <div className="bg-blue-600/20 border border-blue-500/40 p-2 rounded-xl flex items-center justify-center text-blue-400 shadow-inner">
-          <Radio className="w-6 h-6 animate-pulse" />
-        </div>
+        <SavvyLensLogo size={40} />
         <div>
           <div className="flex items-center space-x-2">
-            <h1 className="font-bold text-lg tracking-tight bg-gradient-to-r from-blue-400 via-indigo-300 to-sky-300 bg-clip-text text-transparent">
+            <h1 className="font-bold text-lg tracking-tight text-white">
               SavvyLens
             </h1>
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-medium">
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 font-medium">
               v2.5 Pro
             </span>
           </div>
