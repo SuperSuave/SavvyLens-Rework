@@ -2,11 +2,32 @@
   "name": "savvylens-web",
   "private": true,
   "version": "1.0.0",
+  "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 3000",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0 --port 3000"
+    "preview": "vite preview --host 0.0.0.0 --port 3000",
+    "electron:dev": "concurrently \"npm run dev\" \"wait-on tcp:3000 && electron .\"",
+    "electron:build": "vite build && electron-builder"
+  },
+  "build": {
+    "appId": "com.savvylens.can",
+    "productName": "SavvyLens",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": ["nsis", "portable"]
+    },
+    "linux": {
+      "target": ["AppImage", "deb"]
+    }
   },
   "dependencies": {
     "clsx": "^2.1.1",
@@ -22,9 +43,13 @@
     "@types/react-dom": "^18.3.3",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.20",
+    "concurrently": "^10.0.5",
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.14",
     "typescript": "^5.5.3",
-    "vite": "^5.4.9"
+    "vite": "^5.4.9",
+    "wait-on": "^9.1.0"
   }
 }
