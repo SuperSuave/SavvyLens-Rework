@@ -76,6 +76,12 @@ export default function App() {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  // Trace Playback Engine State (Read-only replay through recorded buffer - NO re-recording)
+  const [isPlaybackActive, setIsPlaybackActive] = useState(false);
+  const [playbackTime, setPlaybackTime] = useState<number>(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
+  const [selectedPlaybackFrame, setSelectedPlaybackFrame] = useState<CANFrame | null>(null);
+
   // SavvyLens Auto-Arm Configuration
   const [autoArm, setAutoArm] = useState<AutoArmConfig>({
     enabled: false,
@@ -338,6 +344,94 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleCreateBookmark]);
+
+  // Read-only Playback Engine Loop (Advances timeline without appending or recording frames)
+  useEffect(() => {
+    if (isCapturing || !isPlaybackActive || frames.length === 0) return;
+
+    const maxTime = frames[frames.length - 1]?.timestamp || 0;
+    let lastTime = performance.now();
+    let animId: number;
+
+    const tick = (now: number) => {
+      const dt = (now - lastTime) / 1000;
+      lastTime = now;
+
+      setPlaybackTime(prev => {
+        const next = prev + dt * playbackSpeed;
+        if (next >= maxTime) {
+          setIsPlaybackActive(false);
+          return maxTime;
+        }
+        return next;
+      });
+
+      animId = requestAnimationFrame(tick);
+    };
+
+    animId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animId);
+  }, [isCapturing, isPlaybackActive, playbackSpeed, frames]);
+
+  // Sync selectedPlaybackFrame to current playbackTime cursor
+  useEffect(() => {
+    if (isCapturing || frames.length === 0) return;
+
+    let low = 0;
+    let high = frames.length - 1;
+    let bestIdx = 0;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      if (frames[mid].timestamp <= playbackTime) {
+        bestIdx = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    const target = frames[bestIdx];
+    if (!selectedPlaybackFrame || selectedPlaybackFrame.timestamp !== target.timestamp || selectedPlaybackFrame.id !== target.id) {
+      setSelectedPlaybackFrame(target);
+    }
+  }, [playbackTime, isCapturing, frames, selectedPlaybackFrame]);
+
+  // Step Frame forward or backward in recorded history
+  const handleStepPlaybackFrame = (dir: 'forward' | 'backward') => {
+    if (isCapturing || frames.length === 0) return;
+    setIsPlaybackActive(false);
+
+    const currIdx = selectedPlaybackFrame 
+      ? frames.findIndex(f => f.id === selectedPlaybackFrame.id && Math.abs(f.timestamp - selectedPlaybackFrame.timestamp) < 0.0001)
+      : 0;
+
+    const nextIdx = dir === 'forward'
+      ? Math.min(frames.length - 1, (currIdx >= 0 ? currIdx + 1 : 0))
+      : Math.max(0, (currIdx >= 0 ? currIdx - 1 : 0));
+
+    const target = frames[nextIdx];
+    if (target) {
+      setPlaybackTime(target.timestamp);
+      setSelectedPlaybackFrame(target);
+    }
+  };
+
+  const handleJumpToPlaybackStart = () => {
+    if (isCapturing || frames.length === 0) return;
+    setIsPlaybackActive(false);
+    if (frames.length > 0) {
+      setPlaybackTime(frames[0].timestamp);
+      setSelectedPlaybackFrame(frames[0]);
+    }
+  };
+
+  const handleJumpToPlaybackEnd = () => {
+    if (isCapturing || frames.length === 0) return;
+    setIsPlaybackActive(false);
+    if (frames.length > 0) {
+      setPlaybackTime(frames[frames.length - 1].timestamp);
+      setSelectedPlaybackFrame(frames[frames.length - 1]);
+    }
+  };
 
   // Live streaming CAN traffic simulation when isCapturing is active
   useEffect(() => {
@@ -619,7 +713,16 @@ export default function App() {
               }}
               initialSearchTerm={snifferFilterTerm}
               isCapturing={isCapturing}
-              onToggleCapture={() => setIsCapturing(prev => !prev)}
+              onToggleCapture={() => {
+                setIsCapturing(prev => {
+                  const next = !prev;
+                  if (next) setIsPlaybackActive(false);
+                  return next;
+                });
+              }}
+              playbackFrame={selectedPlaybackFrame}
+              isPlaybackActive={isPlaybackActive}
+              playbackTime={playbackTime}
             />
           )}
           {activeTab === 'playback' && (
@@ -686,8 +789,21 @@ export default function App() {
       <PlaybackStatusBar
         connections={connections}
         isCapturing={isCapturing}
-        setIsCapturing={setIsCapturing}
+        setIsCapturing={val => {
+          setIsCapturing(val);
+          if (val) setIsPlaybackActive(false);
+        }}
         frameCount={frames.length}
+        frames={frames}
+        playbackTime={playbackTime}
+        setPlaybackTime={setPlaybackTime}
+        isPlaybackActive={isPlaybackActive}
+        setIsPlaybackActive={setIsPlaybackActive}
+        playbackSpeed={playbackSpeed}
+        setPlaybackSpeed={setPlaybackSpeed}
+        onStepFrame={handleStepPlaybackFrame}
+        onJumpToStart={handleJumpToPlaybackStart}
+        onJumpToEnd={handleJumpToPlaybackEnd}
       />
 
       <ConnectionModal

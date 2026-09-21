@@ -14,7 +14,9 @@
     "lint": "tsc --noEmit",
     "preview": "vite preview --host 0.0.0.0 --port 3000",
     "electron:dev": "concurrently \"npm run dev\" \"wait-on tcp:3000 && electron .\"",
-    "electron:build": "vite build && electron-builder"
+    "electron:build": "vite build && electron-builder",
+    "cap:sync": "vite build && npx cap sync",
+    "cap:open:android": "npx cap open android"
   },
   "build": {
     "appId": "com.savvylens.can",
@@ -41,6 +43,8 @@
     }
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/core": "^8.5.2",
     "clsx": "^2.1.1",
     "lucide-react": "^0.344.0",
     "motion": "^11.11.9",
@@ -50,6 +54,7 @@
     "tailwind-merge": "^2.5.4"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.2",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.3",
     "@vitejs/plugin-react": "^4.3.1",

@@ -105,6 +105,7 @@ export const Header: React.FC<HeaderProps> = ({
 
         <button
           onClick={() => setIsCapturing(!isCapturing)}
+          title={isCapturing ? "Pause live CAN capture (enables bottom playback bar)" : "Resume live CAN capture (disables bottom playback bar)"}
           className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center space-x-1.5 transition-colors cursor-pointer ${
             isCapturing 
               ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30 hover:bg-amber-500/20' 
@@ -112,7 +113,7 @@ export const Header: React.FC<HeaderProps> = ({
           }`}
         >
           {isCapturing ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-          <span>{isCapturing ? 'Pause Feed' : 'Resume Feed'}</span>
+          <span>{isCapturing ? 'Pause Capture' : 'Resume Capture'}</span>
         </button>
 
         <button

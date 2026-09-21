@@ -56,6 +56,107 @@ export interface MessageStateHistory {
   allIdFrames: CANFrame[];
 }
 
+// Splits queries separated by commas or spaces, honoring quotes and handling byte syntax like D1:24 or D1=24
+export function parseSearchTokens(query: string): string[] {
+  if (!query || !query.trim()) return [];
+  // Normalize colons and equals with whitespace e.g. "D1: 24" -> "D1:24", "d1 = 0x24" -> "d1:0x24"
+  const normalized = query.trim().replace(/([a-zA-Z0-9]+)\s*[:=]\s*/g, '$1:');
+
+  // Split on comma or whitespace, while supporting quotes
+  const matches = normalized.match(/"([^"]+)"|'([^']+)'|([^,\s]+)/g);
+  if (!matches) return [];
+
+  return matches
+    .map(m => m.replace(/^["']|["']$/g, '').trim())
+    .filter(Boolean);
+}
+
+// Matches target (CANFrame or SnifferIdRow) against parsed search tokens
+export function matchSearchQuery(
+  rawTokens: string[],
+  target: {
+    id: string;
+    decimalId: number;
+    name?: string;
+    data: number[];
+    ascii: string;
+  }
+): boolean {
+  if (rawTokens.length === 0) return true;
+
+  // Frame matches if ANY token matches (OR behavior for multiple searches)
+  return rawTokens.some(token => {
+    const t = token.toLowerCase();
+
+    // Support compound search using '+' (e.g. 0x180+D1:40)
+    if (t.includes('+')) {
+      const subTokens = t.split('+').filter(Boolean);
+      return subTokens.every(sub => matchSingleSearchToken(sub, target));
+    }
+
+    return matchSingleSearchToken(t, target);
+  });
+}
+
+function matchSingleSearchToken(
+  t: string,
+  target: {
+    id: string;
+    decimalId: number;
+    name?: string;
+    data: number[];
+    ascii: string;
+  }
+): boolean {
+  if (!t) return true;
+
+  // 1. D1 - D8 Byte Matcher (1-indexed: D1 is byte 0, D8 is byte 7)
+  // Syntax: D1:24, d1:0x24, D1=24, d8:ff, D3:0, etc.
+  const dMatch = t.match(/^d([1-8])[:=](?:0x)?([0-9a-f]{1,2})$/i);
+  if (dMatch) {
+    const byteIdx = parseInt(dMatch[1], 10) - 1;
+    const expectedByte = parseInt(dMatch[2], 16);
+    return target.data[byteIdx] === expectedByte;
+  }
+
+  // Also support legacy b0 - b7 (0-indexed: b0 is byte 0, b7 is byte 7)
+  const bMatch = t.match(/^b([0-7])[:=](?:0x)?([0-9a-f]{1,2})$/i);
+  if (bMatch) {
+    const byteIdx = parseInt(bMatch[1], 10);
+    const expectedByte = parseInt(bMatch[2], 16);
+    return target.data[byteIdx] === expectedByte;
+  }
+
+  // 2. data: Hex Payload Pattern Search (e.g. data:dead, data:01 02)
+  if (t.startsWith('data:')) {
+    const hexPattern = t.slice(5).replace(/[\s:]+/g, '');
+    const frameHex = target.data.map(b => b.toString(16).padStart(2, '0')).join('');
+    return frameHex.includes(hexPattern);
+  }
+
+  // 3. id: Explicit ID Search (e.g. id:123 or id:0x123)
+  if (t.startsWith('id:')) {
+    const queryId = t.slice(3).replace(/^0x/, '');
+    const normFrameId = target.id.toLowerCase().replace(/^0x/, '');
+    return normFrameId.includes(queryId) || target.decimalId.toString().includes(queryId);
+  }
+
+  // 4. Standard Multi-field Search
+  const normToken = t.replace(/^0x/, '');
+  const normFrameId = target.id.toLowerCase().replace(/^0x/, '');
+  const hexDataNoSpaces = target.data.map(b => b.toString(16).padStart(2, '0')).join('');
+  const hexDataSpaced = target.data.map(b => b.toString(16).padStart(2, '0')).join(' ');
+
+  return (
+    normFrameId.includes(normToken) ||
+    target.decimalId.toString().includes(t) ||
+    (target.name && target.name.toLowerCase().includes(t)) ||
+    hexDataNoSpaces.includes(t.replace(/\s+/g, '')) ||
+    hexDataSpaced.includes(t) ||
+    target.ascii.toLowerCase().includes(t)
+  );
+}
+
 interface LiveSnifferViewProps {
   frames: CANFrame[];
   onClearFrames: () => void;
@@ -67,6 +168,9 @@ interface LiveSnifferViewProps {
   initialSearchTerm?: string;
   isCapturing?: boolean;
   onToggleCapture?: () => void;
+  playbackFrame?: CANFrame | null;
+  isPlaybackActive?: boolean;
+  playbackTime?: number;
 }
 
 type FilterMode = 'all' | 'changed' | 'diverged' | 'new_ids' | 'rx' | 'tx';
@@ -82,7 +186,10 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
   onAddCanTrigger,
   initialSearchTerm = '',
   isCapturing = true,
-  onToggleCapture
+  onToggleCapture,
+  playbackFrame,
+  isPlaybackActive = false,
+  playbackTime
 }) => {
   const [searchTerm, setSearchTerm] = useState(initialSearchTerm);
   const [filterMode, setFilterMode] = useState<FilterMode>('all');
@@ -96,17 +203,31 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
   const [mapByteChoice, setMapByteChoice] = useState<number>(1); // D1 - D8
   const [mapTriggerName, setMapTriggerName] = useState('');
 
-  // Performance Modes: 'sniffer' (Grouped by ID with Period/Freq/Notching) or 'trace' (Chronological virtualized stream)
-  const [viewMode, setViewMode] = useState<'sniffer' | 'trace'>('sniffer');
+  // Performance Modes: 'trace' (Chronological virtualized stream - default) or 'sniffer' (Grouped by ID)
+  const [viewMode, setViewMode] = useState<'trace' | 'sniffer'>('trace');
   const [snifferSortBy, setSnifferSortBy] = useState<'id' | 'period' | 'count' | 'activity'>('id');
   const [snifferSortAsc, setSnifferSortAsc] = useState<boolean>(true);
+
+  // Trace Mode Sorting: Smart primary sort with secondary tie-breaker as original arrival order
+  const [traceSortBy, setTraceSortBy] = useState<'time' | 'id' | 'bus' | 'dlc' | 'name' | 'period' | 'count'>('time');
+  const [traceSortAsc, setTraceSortAsc] = useState<boolean>(true);
   const [notchedBitsMap, setNotchedBitsMap] = useState<Map<string, number[]>>(new Map());
 
-  // Virtualization state for Trace mode (high-fps windowing for 100k+ frames on Windows)
+  // Virtualization & container refs for both views
   const tableContainerRef = React.useRef<HTMLDivElement>(null);
+  const snifferContainerRef = React.useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [containerHeight, setContainerHeight] = useState(600);
   const [autoScroll, setAutoScroll] = useState(true);
+
+  // Sync selected frame from playback scrubber
+  React.useEffect(() => {
+    if (playbackFrame) {
+      if (!selectedFrame || selectedFrame.id !== playbackFrame.id || Math.abs(selectedFrame.timestamp - playbackFrame.timestamp) > 0.0001) {
+        setSelectedFrame(playbackFrame);
+      }
+    }
+  }, [playbackFrame, selectedFrame]);
 
   React.useEffect(() => {
     if (!tableContainerRef.current) return;
@@ -264,10 +385,17 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
     }
   }, [initialSearchTerm]);
 
-  // SavvyLens Enhanced Search & Filtering Engine
+  // SavvyLens Multi-Search Tokenizer (Supports comma/space separated queries & D1-D8 bytes)
+  const searchTokens = useMemo(() => parseSearchTokens(searchTerm), [searchTerm]);
+
+  // SavvyLens Enhanced Search & Filtering Engine with Smart Secondary Trace Sort
   const filteredFrames = useMemo(() => {
-    return frames.filter(frame => {
-      // 1. Filter mode condition
+    // 1. Tag frames with original arrival order index
+    const indexed = frames.map((f, originalIndex) => ({ frame: f, originalIndex }));
+
+    // 2. Filter by filterMode and multi-search query
+    const filtered = indexed.filter(({ frame }) => {
+      // Filter mode condition
       if (filterMode === 'changed') {
         const hasChanges = frame.changedBytes?.some(c => c);
         if (!hasChanges) return false;
@@ -290,40 +418,39 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
         if (frame.direction !== 'TX') return false;
       }
 
-      // 2. Enhanced Search Query Parser
-      if (!searchTerm.trim()) return true;
-
-      const term = searchTerm.trim().toLowerCase();
-
-      // Advanced syntax support (e.g. data:de ad or id:123 or b0:01)
-      if (term.startsWith('data:')) {
-        const hexPattern = term.slice(5).replace(/\s+/g, '');
-        const frameHex = frame.data.map(b => b.toString(16).padStart(2, '0')).join('');
-        return frameHex.includes(hexPattern);
-      }
-
-      if (term.startsWith('id:')) {
-        const queryId = term.slice(3);
-        return frame.id.toLowerCase().includes(queryId) || frame.decimalId.toString().includes(queryId);
-      }
-
-      if (term.startsWith('b0:')) {
-        const b0Hex = term.slice(3).padStart(2, '0');
-        const frameB0 = (frame.data[0] || 0).toString(16).padStart(2, '0');
-        return frameB0 === b0Hex;
-      }
-
-      // Standard multi-field search
-      const hexData = frame.data.map(b => b.toString(16).padStart(2, '0')).join(' ');
-      return (
-        frame.id.toLowerCase().includes(term) ||
-        frame.decimalId.toString().includes(term) ||
-        (frame.name && frame.name.toLowerCase().includes(term)) ||
-        hexData.includes(term) ||
-        frame.ascii.toLowerCase().includes(term)
-      );
+      // Enhanced Multi-Search (comma/space separated, D1-D8 bytes, data hex, IDs)
+      return matchSearchQuery(searchTokens, frame);
     });
-  }, [frames, filterMode, searchTerm]);
+
+    // 3. Smart Sorting for Trace Stream: Primary chosen metric + Secondary arrival order (never random)
+    filtered.sort((a, b) => {
+      let primaryDiff = 0;
+      if (traceSortBy === 'time') {
+        primaryDiff = a.frame.timestamp - b.frame.timestamp;
+      } else if (traceSortBy === 'id') {
+        primaryDiff = a.frame.decimalId - b.frame.decimalId;
+      } else if (traceSortBy === 'bus') {
+        primaryDiff = a.frame.bus - b.frame.bus;
+      } else if (traceSortBy === 'dlc') {
+        primaryDiff = a.frame.dlc - b.frame.dlc;
+      } else if (traceSortBy === 'name') {
+        primaryDiff = (a.frame.name || '').localeCompare(b.frame.name || '');
+      } else if (traceSortBy === 'period') {
+        primaryDiff = (a.frame.periodMs || 0) - (b.frame.periodMs || 0);
+      } else if (traceSortBy === 'count') {
+        primaryDiff = (a.frame.count || 0) - (b.frame.count || 0);
+      }
+
+      if (primaryDiff !== 0) {
+        return traceSortAsc ? primaryDiff : -primaryDiff;
+      }
+
+      // Secondary sort is ALWAYS the exact arrival order (originalIndex)
+      return a.originalIndex - b.originalIndex;
+    });
+
+    return filtered.map(item => item.frame);
+  }, [frames, filterMode, searchTokens, traceSortBy, traceSortAsc, latchedPulses, baselineMap]);
 
   // SavvyLens Aggregated Sniffer Engine (Grouped by Unique CAN ID with Period, Frequency, and Delta tracking)
   const aggregatedSnifferRows = useMemo<SnifferIdRow[]>(() => {
@@ -388,15 +515,9 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
       lastDeltaSec: Number((currentTime - r.timestamp).toFixed(2))
     }));
 
-    // Apply search filter
-    if (searchTerm.trim()) {
-      const term = searchTerm.trim().toLowerCase();
-      list = list.filter(r => 
-        r.id.toLowerCase().includes(term) ||
-        r.decimalId.toString().includes(term) ||
-        (r.name && r.name.toLowerCase().includes(term)) ||
-        r.data.map(b => b.toString(16).padStart(2, '0')).join('').includes(term.replace(/\s+/g, ''))
-      );
+    // Apply search filter using the unified multi-search and D1-D8 matcher
+    if (searchTokens.length > 0) {
+      list = list.filter(r => matchSearchQuery(searchTokens, r));
     }
 
     // Filter mode
@@ -406,18 +527,22 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
       list = list.filter(r => r.isNewId);
     }
 
-    // Sort
+    // Sort with smart secondary tie-breaker (CAN ID numerical order)
     list.sort((a, b) => {
       let diff = 0;
       if (snifferSortBy === 'id') diff = a.decimalId - b.decimalId;
       else if (snifferSortBy === 'period') diff = a.periodMs - b.periodMs;
       else if (snifferSortBy === 'count') diff = a.count - b.count;
       else if (snifferSortBy === 'activity') diff = a.lastDeltaSec - b.lastDeltaSec;
-      return snifferSortAsc ? diff : -diff;
+
+      if (diff !== 0) {
+        return snifferSortAsc ? diff : -diff;
+      }
+      return a.decimalId - b.decimalId;
     });
 
     return list;
-  }, [frames, searchTerm, filterMode, snifferSortBy, snifferSortAsc]);
+  }, [frames, searchTokens, filterMode, snifferSortBy, snifferSortAsc]);
 
   // SavvyLens Trace Virtualization Calculation
   const ROW_HEIGHT = 38;
@@ -431,6 +556,59 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
   }, [filteredFrames, startIndex, endIndex]);
   const topPadding = startIndex * ROW_HEIGHT;
   const bottomPadding = Math.max(0, (totalRows - endIndex) * ROW_HEIGHT);
+
+  // Keep selected frame centered when search, filters, sorting, or view mode changes
+  const lastCenterKeyRef = React.useRef<string>('');
+
+  React.useEffect(() => {
+    if (!selectedFrame) return;
+
+    const currentKey = `${searchTerm}|${filterMode}|${traceSortBy}|${traceSortAsc}|${snifferSortBy}|${snifferSortAsc}|${viewMode}`;
+    if (lastCenterKeyRef.current === currentKey) return;
+    lastCenterKeyRef.current = currentKey;
+
+    const frameIdToFind = selectedFrame.id.toLowerCase();
+    const frameTs = selectedFrame.timestamp;
+
+    const rafId = requestAnimationFrame(() => {
+      if (viewMode === 'trace' && tableContainerRef.current) {
+        const idx = filteredFrames.findIndex(f => 
+          f.id.toLowerCase() === frameIdToFind && 
+          Math.abs(f.timestamp - frameTs) < 0.0001
+        );
+
+        if (idx >= 0) {
+          const targetScroll = Math.max(0, idx * ROW_HEIGHT - containerHeight / 2 + ROW_HEIGHT / 2);
+          tableContainerRef.current.scrollTop = targetScroll;
+          setAutoScroll(false); // Pause auto-scroll so the viewport stays centered on the selected message
+        }
+      } else if (viewMode === 'sniffer' && snifferContainerRef.current) {
+        const rowIdx = aggregatedSnifferRows.findIndex(r => 
+          r.id.toLowerCase() === frameIdToFind
+        );
+
+        if (rowIdx >= 0) {
+          const rowHeight = 42;
+          const targetScroll = Math.max(0, rowIdx * rowHeight - containerHeight / 2 + rowHeight / 2);
+          snifferContainerRef.current.scrollTop = targetScroll;
+        }
+      }
+    });
+
+    return () => cancelAnimationFrame(rafId);
+  }, [
+    searchTerm,
+    filterMode,
+    traceSortBy,
+    traceSortAsc,
+    snifferSortBy,
+    snifferSortAsc,
+    viewMode,
+    selectedFrame,
+    filteredFrames,
+    aggregatedSnifferRows,
+    containerHeight
+  ]);
 
   // Auto-scroll handler for Trace mode
   React.useEffect(() => {
@@ -595,7 +773,7 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
               <input
                 id="savvylens-search-input"
                 type="text"
-                placeholder="SavvyLens Enhanced Search (e.g. 0x123, data:DE AD, b0:01, ASCII)..."
+                placeholder="Multi-search (comma or space): e.g. 0x120, 0x240 or D1:24, D4:02, data:DE AD, ASCII..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-9 pr-8 py-1.5 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-blue-500 font-mono"
@@ -614,20 +792,8 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
 
           {/* Performance View Mode Toggle & Quick Filter Pills */}
           <div className="flex items-center space-x-2 flex-wrap gap-y-2">
-            {/* View Mode Switcher */}
+            {/* View Mode Switcher: Trace Stream on left (default), Sniffer (Grouped) on right */}
             <div className="flex items-center space-x-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
-              <button
-                onClick={() => setViewMode('sniffer')}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer ${
-                  viewMode === 'sniffer'
-                    ? 'bg-blue-600 text-white shadow-xs'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-                title="Sniffer Mode: Groups messages by unique CAN ID with period, frequency, and live delta highlights (SavvyCAN / cansniffer)"
-              >
-                <Radio className="w-3.5 h-3.5" />
-                <span>Sniffer (Grouped)</span>
-              </button>
               <button
                 onClick={() => setViewMode('trace')}
                 className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer ${
@@ -635,10 +801,22 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
                     ? 'bg-blue-600 text-white shadow-xs'
                     : 'text-slate-400 hover:text-white'
                 }`}
-                title="Trace Mode: Chronological streaming log with virtualized smooth 60 FPS scrolling"
+                title="Trace Stream: Chronological streaming log with virtualized smooth 60 FPS scrolling and smart sorting"
               >
                 <History className="w-3.5 h-3.5" />
                 <span>Trace Stream</span>
+              </button>
+              <button
+                onClick={() => setViewMode('sniffer')}
+                className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer ${
+                  viewMode === 'sniffer'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+                title="Sniffer Mode: Groups messages by unique CAN ID with period, frequency, and live delta highlights"
+              >
+                <Radio className="w-3.5 h-3.5" />
+                <span>Sniffer (Grouped)</span>
               </button>
             </div>
 
@@ -880,48 +1058,82 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
             </>
           ) : (
             <>
-              <div className="flex items-center space-x-2">
-                <span className="text-slate-400 font-medium">Trace Controls:</span>
-                <button
-                  onClick={() => setAutoScroll(!autoScroll)}
-                  className={`px-2.5 py-1 rounded-lg font-medium flex items-center space-x-1.5 border transition cursor-pointer ${
-                    autoScroll
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
-                  }`}
-                  title={autoScroll ? 'Streaming live (Click to pause follow)' : 'Auto-scroll paused (Click to follow live)'}
-                >
-                  <span className={`w-2 h-2 rounded-full ${autoScroll ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-                  <span>{autoScroll ? 'Auto-Scroll ON' : 'Auto-Scroll PAUSED'}</span>
-                </button>
-
-                <button
-                  onClick={() => {
-                    if (tableContainerRef.current) {
-                      tableContainerRef.current.scrollTop = 0;
+              <div className="flex items-center space-x-3 flex-wrap gap-y-1.5">
+                {/* Trace Stream Smart Sort Controls */}
+                <div className="flex items-center space-x-1.5">
+                  <span className="text-slate-400 font-medium">Sort by:</span>
+                  <select
+                    value={traceSortBy}
+                    onChange={(e) => {
+                      setTraceSortBy(e.target.value as any);
+                      if (e.target.value !== 'time') setAutoScroll(false);
+                    }}
+                    className="bg-slate-950 border border-slate-800 text-white rounded-lg px-2 py-0.5 text-xs font-mono focus:outline-hidden cursor-pointer"
+                  >
+                    <option value="time">Timestamp (Arrival Order)</option>
+                    <option value="id">CAN ID (Hex)</option>
+                    <option value="bus">Bus Channel</option>
+                    <option value="dlc">DLC Length</option>
+                    <option value="name">Message Name</option>
+                    <option value="period">Period (Delta)</option>
+                    <option value="count">Message Count</option>
+                  </select>
+                  <button
+                    onClick={() => {
+                      setTraceSortAsc(!traceSortAsc);
                       setAutoScroll(false);
-                    }
-                  }}
-                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[11px] transition cursor-pointer"
-                >
-                  Jump to Top
-                </button>
-                <button
-                  onClick={() => {
-                    if (tableContainerRef.current) {
-                      tableContainerRef.current.scrollTop = tableContainerRef.current.scrollHeight;
-                      setAutoScroll(true);
-                    }
-                  }}
-                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[11px] transition cursor-pointer"
-                >
-                  Jump to Latest
-                </button>
+                    }}
+                    className="p-1 bg-slate-950 border border-slate-800 text-slate-300 hover:text-white rounded-lg cursor-pointer"
+                    title={traceSortAsc ? 'Ascending (Click for Descending)' : 'Descending (Click for Ascending)'}
+                  >
+                    {traceSortAsc ? '▲' : '▼'}
+                  </button>
+                </div>
+
+                <div className="h-4 w-px bg-slate-800 hidden sm:block" />
+
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={() => setAutoScroll(!autoScroll)}
+                    className={`px-2.5 py-1 rounded-lg font-medium flex items-center space-x-1.5 border transition cursor-pointer ${
+                      autoScroll
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                    }`}
+                    title={autoScroll ? 'Streaming live (Click to pause follow)' : 'Auto-scroll paused (Click to follow live)'}
+                  >
+                    <span className={`w-2 h-2 rounded-full ${autoScroll ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                    <span>{autoScroll ? 'Auto-Scroll ON' : 'Auto-Scroll PAUSED'}</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      if (tableContainerRef.current) {
+                        tableContainerRef.current.scrollTop = 0;
+                        setAutoScroll(false);
+                      }
+                    }}
+                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[11px] transition cursor-pointer"
+                  >
+                    Jump to Top
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (tableContainerRef.current) {
+                        tableContainerRef.current.scrollTop = tableContainerRef.current.scrollHeight;
+                        setAutoScroll(true);
+                      }
+                    }}
+                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[11px] transition cursor-pointer"
+                  >
+                    Jump to Latest
+                  </button>
+                </div>
               </div>
 
               <div className="flex items-center space-x-2">
                 <span className="text-slate-500 text-[11px] font-sans">
-                  Windowed View (60 FPS on Windows):
+                  Windowed View (60 FPS):
                 </span>
                 <span className="px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/30 font-mono text-[11px]">
                   Rendering {visibleFrames.length} of {filteredFrames.length.toLocaleString()} frames
@@ -933,7 +1145,7 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
 
         {/* Dynamic Display: Sniffer Mode (Grouped by ID) or Trace Mode (Virtualized Chronological Stream) */}
         {viewMode === 'sniffer' ? (
-          <div className="flex-1 overflow-auto">
+          <div ref={snifferContainerRef} className="flex-1 overflow-auto">
             <table className="w-full text-left border-collapse font-mono text-xs">
               <thead className="bg-slate-900/95 text-slate-400 sticky top-0 border-b border-slate-800 select-none z-10">
                 <tr>
@@ -1069,15 +1281,69 @@ export const LiveSnifferView: React.FC<LiveSnifferViewProps> = ({
             <table className="w-full text-left border-collapse font-mono text-xs">
               <thead className="bg-slate-900/95 text-slate-400 sticky top-0 border-b border-slate-800 select-none z-10">
                 <tr>
-                  <th className="py-2.5 px-3 font-medium">Timestamp</th>
-                  <th className="py-2.5 px-3 font-medium">Bus</th>
+                  <th 
+                    onClick={() => {
+                      if (traceSortBy === 'time') setTraceSortAsc(!traceSortAsc);
+                      else { setTraceSortBy('time'); setTraceSortAsc(true); }
+                    }}
+                    className="py-2.5 px-3 font-medium cursor-pointer hover:text-white transition select-none"
+                    title="Sort by Timestamp (Arrival Order)"
+                  >
+                    Timestamp {traceSortBy === 'time' && (traceSortAsc ? '▲' : '▼')}
+                  </th>
+                  <th 
+                    onClick={() => {
+                      if (traceSortBy === 'bus') setTraceSortAsc(!traceSortAsc);
+                      else { setTraceSortBy('bus'); setTraceSortAsc(true); setAutoScroll(false); }
+                    }}
+                    className="py-2.5 px-3 font-medium cursor-pointer hover:text-white transition select-none"
+                    title="Sort by Bus Channel"
+                  >
+                    Bus {traceSortBy === 'bus' && (traceSortAsc ? '▲' : '▼')}
+                  </th>
                   <th className="py-2.5 px-3 font-medium">Dir</th>
-                  <th className="py-2.5 px-3 font-medium">CAN ID</th>
-                  <th className="py-2.5 px-3 font-medium">Message Name</th>
-                  <th className="py-2.5 px-3 font-medium">DLC</th>
+                  <th 
+                    onClick={() => {
+                      if (traceSortBy === 'id') setTraceSortAsc(!traceSortAsc);
+                      else { setTraceSortBy('id'); setTraceSortAsc(true); setAutoScroll(false); }
+                    }}
+                    className="py-2.5 px-3 font-medium cursor-pointer hover:text-white transition select-none"
+                    title="Sort by CAN ID"
+                  >
+                    CAN ID {traceSortBy === 'id' && (traceSortAsc ? '▲' : '▼')}
+                  </th>
+                  <th 
+                    onClick={() => {
+                      if (traceSortBy === 'name') setTraceSortAsc(!traceSortAsc);
+                      else { setTraceSortBy('name'); setTraceSortAsc(true); setAutoScroll(false); }
+                    }}
+                    className="py-2.5 px-3 font-medium cursor-pointer hover:text-white transition select-none"
+                    title="Sort by Message Name"
+                  >
+                    Message Name {traceSortBy === 'name' && (traceSortAsc ? '▲' : '▼')}
+                  </th>
+                  <th 
+                    onClick={() => {
+                      if (traceSortBy === 'dlc') setTraceSortAsc(!traceSortAsc);
+                      else { setTraceSortBy('dlc'); setTraceSortAsc(true); setAutoScroll(false); }
+                    }}
+                    className="py-2.5 px-3 font-medium cursor-pointer hover:text-white transition select-none"
+                    title="Sort by DLC Length"
+                  >
+                    DLC {traceSortBy === 'dlc' && (traceSortAsc ? '▲' : '▼')}
+                  </th>
                   <th className="py-2.5 px-3 font-medium">Data Bytes (D1–D8)</th>
                   <th className="py-2.5 px-3 font-medium">ASCII</th>
-                  <th className="py-2.5 px-3 font-medium text-right">Count</th>
+                  <th 
+                    onClick={() => {
+                      if (traceSortBy === 'count') setTraceSortAsc(!traceSortAsc);
+                      else { setTraceSortBy('count'); setTraceSortAsc(true); setAutoScroll(false); }
+                    }}
+                    className="py-2.5 px-3 font-medium text-right cursor-pointer hover:text-white transition select-none"
+                    title="Sort by Message Count"
+                  >
+                    Count {traceSortBy === 'count' && (traceSortAsc ? '▲' : '▼')}
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-900">
