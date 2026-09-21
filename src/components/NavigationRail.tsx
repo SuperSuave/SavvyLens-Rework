@@ -1,12 +1,22 @@
-import React from 'react';
-import { Layers, Database, LineChart, Send, Code, Cpu, Shield, Zap, GitBranch, GitCompare, Bookmark, Film, Network } from 'lucide-react';
+import React, { useState } from 'react';
+import { 
+  Layers, Database, LineChart, Send, Code, Cpu, Shield, Zap, 
+  GitBranch, GitCompare, Bookmark, Network, ChevronLeft, ChevronRight, Activity 
+} from 'lucide-react';
 
 interface NavigationRailProps {
   activeTab: string;
   setActiveTab: (tab: string) => void;
+  defaultCollapsed?: boolean;
 }
 
-export const NavigationRail: React.FC<NavigationRailProps> = ({ activeTab, setActiveTab }) => {
+export const NavigationRail: React.FC<NavigationRailProps> = ({ 
+  activeTab, 
+  setActiveTab,
+  defaultCollapsed = false
+}) => {
+  const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
+
   const tabs = [
     { id: 'sniffer', label: 'Live Sniffer', icon: Layers, description: 'Real-time CAN frame grid & sniffer' },
     { id: 'dbc', label: 'DBC Manager', icon: Database, description: 'Signal decoders & message database' },
@@ -20,57 +30,105 @@ export const NavigationRail: React.FC<NavigationRailProps> = ({ activeTab, setAc
     { id: 'graphing', label: 'Graphing & Signals', icon: LineChart, description: 'Real-time time-series plots' },
     { id: 'sender', label: 'Frame Sender', icon: Send, description: 'Cyclic & manual CAN frame transmission' },
     { id: 'scripting', label: 'Scripting Engine', icon: Code, description: 'JavaScript automation & fuzzing' },
-    { id: 'connections', label: 'Connections & Logs', icon: Cpu, description: 'Hardware interfaces & GVRET IP' },
+    { id: 'connections', label: 'Device Detector & Hardware', icon: Wifi, description: 'WiCAN & CAN-Do auto-discovery' },
   ];
 
   return (
-    <nav className="bg-slate-900/90 border-r border-slate-800 flex flex-col w-64 p-3 select-none shrink-0 overflow-y-auto">
-      <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider px-3 mb-2">
-        SavvyLens Workspace
+    <nav 
+      id="sidebar-navigation"
+      aria-label="Sidebar Navigation"
+      className={`bg-slate-900/95 border-r border-slate-800 flex flex-col select-none shrink-0 overflow-y-auto overflow-x-hidden transition-all duration-200 ${
+        isCollapsed ? 'w-16 p-2' : 'w-64 p-3'
+      }`}
+    >
+      {/* Top Header & Collapse Toggle */}
+      <div className={`flex items-center mb-2 pb-2 border-b border-slate-800/80 ${isCollapsed ? 'justify-center' : 'justify-between px-2'}`}>
+        {!isCollapsed && (
+          <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+            Workspace
+          </span>
+        )}
+        <button
+          id="collapse-sidebar-toggle-btn"
+          onClick={() => setIsCollapsed(!isCollapsed)}
+          title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition flex items-center justify-center"
+        >
+          {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+        </button>
       </div>
+
+      {/* Nav items list */}
       <div className="space-y-1">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
           return (
             <button
+              id={`nav-tab-${tab.id}-btn`}
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`w-full flex items-start space-x-3 px-3 py-2 rounded-xl transition text-left group ${
+              title={isCollapsed ? `${tab.label} — ${tab.description}` : undefined}
+              className={`w-full flex items-center rounded-xl transition text-left group ${
+                isCollapsed ? 'justify-center p-2' : 'space-x-3 px-3 py-2'
+              } ${
                 isActive 
                   ? 'bg-blue-600/15 text-blue-400 border border-blue-500/30 shadow-sm' 
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border border-transparent'
               }`}
             >
-              <div className={`p-1.5 rounded-lg mt-0.5 ${isActive ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 group-hover:text-slate-200'}`}>
+              <div 
+                className={`p-1.5 rounded-lg shrink-0 ${
+                  isActive 
+                    ? 'bg-blue-600 text-white' 
+                    : 'bg-slate-800 text-slate-400 group-hover:text-slate-200 group-hover:bg-slate-700/80'
+                }`}
+              >
                 <Icon className="w-4 h-4" />
               </div>
-              <div>
-                <div className={`text-xs font-semibold ${isActive ? 'text-blue-300' : 'text-slate-200'}`}>
-                  {tab.label}
+              
+              {!isCollapsed && (
+                <div className="min-w-0 flex-1">
+                  <div className={`text-xs font-semibold truncate ${isActive ? 'text-blue-300' : 'text-slate-200'}`}>
+                    {tab.label}
+                  </div>
+                  <div className="text-[10px] text-slate-400 leading-tight mt-0.5 truncate">
+                    {tab.description}
+                  </div>
                 </div>
-                <div className="text-[10px] text-slate-400 leading-tight mt-0.5">
-                  {tab.description}
-                </div>
-              </div>
+              )}
             </button>
           );
         })}
       </div>
 
-      <div className="mt-auto pt-4 border-t border-slate-800 px-3">
-        <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800/80 text-xs">
-          <div className="font-medium text-slate-300 mb-1">CAN Bus Status</div>
-          <div className="flex justify-between text-slate-400 text-[11px] mb-0.5">
-            <span>Bus Load:</span>
-            <span className="text-emerald-400 font-mono">24.5%</span>
+      {/* Footer Status Widget */}
+      <div className="mt-auto pt-3 border-t border-slate-800">
+        {isCollapsed ? (
+          <div 
+            title="CAN Bus: Active (Load: 24.5%, Errors: 0)" 
+            className="flex items-center justify-center p-2 rounded-xl bg-slate-950/60 border border-slate-800 text-emerald-400 hover:bg-slate-800/60 transition cursor-pointer"
+          >
+            <Activity className="w-4 h-4" />
           </div>
-          <div className="flex justify-between text-slate-400 text-[11px]">
-            <span>Error Frames:</span>
-            <span className="text-emerald-400 font-mono">0</span>
+        ) : (
+          <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800/80 text-xs">
+            <div className="font-medium text-slate-300 mb-1 flex items-center space-x-1.5">
+              <Activity className="w-3.5 h-3.5 text-blue-400" />
+              <span>CAN Bus Status</span>
+            </div>
+            <div className="flex justify-between text-slate-400 text-[11px] mb-0.5">
+              <span>Bus Load:</span>
+              <span className="text-emerald-400 font-mono">24.5%</span>
+            </div>
+            <div className="flex justify-between text-slate-400 text-[11px]">
+              <span>Error Frames:</span>
+              <span className="text-emerald-400 font-mono">0</span>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </nav>
   );
 };
+

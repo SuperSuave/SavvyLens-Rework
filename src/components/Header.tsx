@@ -35,14 +35,14 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
         <div>
           <div className="flex items-center space-x-2">
-            <h1 className="font-bold text-lg tracking-tight bg-gradient-to-r from-blue-400 to-indigo-300 bg-clip-text text-transparent">
-              SavvyLens Web
+            <h1 className="font-bold text-lg tracking-tight bg-gradient-to-r from-blue-400 via-indigo-300 to-sky-300 bg-clip-text text-transparent">
+              SavvyLens
             </h1>
-            <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-medium">
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-medium">
               v2.5 Pro
             </span>
           </div>
-          <p className="text-xs text-slate-400">Automotive CAN Bus Analyzer & Reverse Engineering Studio</p>
+          <p className="text-xs text-slate-400">Automotive CAN Bus Reverse Engineering Studio</p>
         </div>
       </div>
 
