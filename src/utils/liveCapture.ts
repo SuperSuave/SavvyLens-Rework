@@ -2,6 +2,7 @@ import { CANFrame, ConnectionConfig } from '../types';
 
 export class LiveHardwareStreamer {
   private ws: WebSocket | null = null;
+  private tcpSocket: any = null;
   private reconnectTimer: any = null;
   private isRunning = false;
 
@@ -16,8 +17,41 @@ export class LiveHardwareStreamer {
     this.isRunning = true;
 
     const ip = this.connection.ipAddress || '192.168.4.1';
-    const port = this.connection.tcpPort || 81;
+    const port = this.connection.tcpPort || 23; // SuperSuave/can-do defaults to port 23 for raw TCP GVRET stream
+
+    // Check if running in Electron and port is 23 (raw TCP stream)
+    const isElectron = typeof window !== 'undefined' && (window as any).electronAPI !== undefined;
+
+    if (port === 23 && isElectron) {
+      this.startTcpElectron(ip, port);
+    } else {
+      this.startWebSocket(ip, port);
+    }
+  }
+
+  private startTcpElectron(ip: string, port: number) {
+    this.onError(`Connecting via raw TCP to CAN-Do device at ${ip}:${port}...`);
+    try {
+      const electronAPI = (window as any).electronAPI;
+      if (electronAPI && electronAPI.connectTcp) {
+        electronAPI.connectTcp(ip, port, (buffer: ArrayBuffer) => {
+          this.parseBinaryData(buffer);
+        });
+        electronAPI.onTcpError((err: string) => {
+          this.onError(`TCP connection error: ${err}`);
+        });
+      } else {
+        // Fallback to WebSocket if bridge not ready
+        this.startWebSocket(ip, 81);
+      }
+    } catch (e) {
+      this.onError(`Failed to establish TCP connection to ${ip}:${port}`);
+    }
+  }
+
+  private startWebSocket(ip: string, port: number) {
     const wsUrl = `ws://${ip}:${port}`;
+    this.onError(`Connecting via WebSocket to ${wsUrl}...`);
 
     try {
       this.ws = new WebSocket(wsUrl);
@@ -50,36 +84,7 @@ export class LiveHardwareStreamer {
               this.onFrame(parsed);
             }
           } else if (event.data instanceof ArrayBuffer) {
-            const bytes = new Uint8Array(event.data);
-            if (bytes.length >= 13) {
-              const view = new DataView(event.data);
-              const timestamp = view.getUint32(0, true) / 1000000.0;
-              const canIdRaw = view.getUint32(4, true);
-              const canId = (canIdRaw & 0x1FFFFFFF);
-              const bus = bytes[8];
-              const dlc = bytes[9];
-              const data: number[] = [];
-              for (let i = 0; i < Math.min(dlc, 8); i++) {
-                data.push(bytes[10 + i]);
-              }
-              const idHex = '0x' + canId.toString(16).toUpperCase();
-              const parsed: CANFrame = {
-                id: idHex,
-                decimalId: canId,
-                name: `CAN_${idHex}`,
-                timestamp: timestamp > 0 ? timestamp : Date.now() / 1000,
-                bus,
-                dlc: data.length,
-                data,
-                ascii: data.map(b => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join(''),
-                count: 1,
-                direction: 'RX',
-                changedBytes: data.map(() => false),
-                changedBits: data.map(() => 0),
-                isNewId: true
-              };
-              this.onFrame(parsed);
-            }
+            this.parseBinaryData(event.data);
           }
         } catch (e) {
           console.error('Error parsing live frame:', e);
@@ -88,7 +93,7 @@ export class LiveHardwareStreamer {
 
       this.ws.onerror = (err) => {
         console.warn('Live hardware WebSocket error:', err);
-        this.onError(`Hardware connection error to ${ip}:${port}. Please verify Wi-Fi connection and adapter IP.`);
+        this.onError(`Hardware connection error to ${ip}:${port} (Port 23 is raw TCP; ensure adapter supports WS bridge or use Electron app).`);
       };
 
       this.ws.onclose = () => {
@@ -97,7 +102,41 @@ export class LiveHardwareStreamer {
         }
       };
     } catch (e) {
-      this.onError(`Failed to open live WebSocket to ${wsUrl}`);
+      this.onError(`Failed to open live connection to ${wsUrl}`);
+    }
+  }
+
+  private parseBinaryData(arrayBuffer: ArrayBuffer) {
+    const bytes = new Uint8Array(arrayBuffer);
+    // GVRET binary frame parsing logic
+    if (bytes.length >= 13) {
+      const view = new DataView(arrayBuffer);
+      const timestamp = view.getUint32(0, true) / 1000000.0;
+      const canIdRaw = view.getUint32(4, true);
+      const canId = (canIdRaw & 0x1FFFFFFF);
+      const bus = bytes[8];
+      const dlc = bytes[9];
+      const data: number[] = [];
+      for (let i = 0; i < Math.min(dlc, 8); i++) {
+        data.push(bytes[10 + i]);
+      }
+      const idHex = '0x' + canId.toString(16).toUpperCase();
+      const parsed: CANFrame = {
+        id: idHex,
+        decimalId: canId,
+        name: `CAN_${idHex}`,
+        timestamp: timestamp > 0 ? timestamp : Date.now() / 1000,
+        bus,
+        dlc: data.length,
+        data,
+        ascii: data.map(b => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join(''),
+        count: 1,
+        direction: 'RX',
+        changedBytes: data.map(() => false),
+        changedBits: data.map(() => 0),
+        isNewId: true
+      };
+      this.onFrame(parsed);
     }
   }
 
@@ -107,6 +146,10 @@ export class LiveHardwareStreamer {
     if (this.ws) {
       this.ws.close();
       this.ws = null;
+    }
+    if (this.tcpSocket && this.tcpSocket.destroy) {
+      this.tcpSocket.destroy();
+      this.tcpSocket = null;
     }
   }
 }

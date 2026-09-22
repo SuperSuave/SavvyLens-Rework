@@ -11,6 +11,7 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       webSecurity: false,
+      preload: path.join(__dirname, 'preload.cjs'),
     },
     autoHideMenuBar: true,
   });
