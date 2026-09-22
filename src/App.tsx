@@ -22,6 +22,7 @@ import { ConnectionModal } from './components/ConnectionModal';
 import { ImportModal } from './components/ImportModal';
 import { MobileCompanionView } from './components/MobileCompanionView';
 import { PlaybackStatusBar } from './components/PlaybackStatusBar';
+import { LiveHardwareStreamer } from './utils/liveCapture';
 import { INITIAL_CONNECTIONS, INITIAL_DBC_MESSAGES, generateInitialCANFrames } from './data/mockData';
 import { CANFrame, ConnectionConfig, DBCMessage, ScriptItem, Bookmark, CANMessageTrigger } from './types';
 
@@ -397,82 +398,54 @@ export default function App() {
     }
   };
 
-  // Live streaming CAN traffic simulation when isCapturing is active and device is connected
+  // Live hardware streaming when isCapturing is active and device is connected
   useEffect(() => {
     if (!isCapturing) return;
 
-    const hasConnectedDevice = connections.some(c => c.status === 'Connected');
-    if (!hasConnectedDevice) {
+    const connectedConn = connections.find(c => c.status === 'Connected');
+    if (!connectedConn) {
       setIsCapturing(false);
       showToast('SavvyLens: Cannot start capture. No active hardware connection.');
       return;
     }
 
-    const interval = setInterval(() => {
-      const currentFrames = framesRef.current;
-      const lastTs = currentFrames.length > 0 ? currentFrames[currentFrames.length - 1].timestamp : 120.0;
-      const newTs = Number((lastTs + 0.045 + Math.random() * 0.02).toFixed(3));
-      
-      const choice = Math.random();
-      let id = '0x201';
-      let decId = 513;
-      let name = 'ECM_Engine_Status';
-      let data = [0, 0, 0, 0, 0, 0, 0, 0];
+    const streamer = new LiveHardwareStreamer(
+      connectedConn,
+      (newFrame) => {
+        const lastMatch = lastFrameByIdRef.current.get(newFrame.id.toLowerCase());
+        const changedBytes = newFrame.data.map((b, i) => !lastMatch || lastMatch.data[i] !== b);
+        const changedBits = newFrame.data.map((b, i) => lastMatch ? ((lastMatch.data[i] ^ b) & 0xFF) : 0);
+        
+        const enhancedFrame: CANFrame = {
+          ...newFrame,
+          count: lastMatch ? lastMatch.count + 1 : 1,
+          changedBytes,
+          changedBits,
+          prevData: lastMatch ? lastMatch.data : undefined,
+          isNewId: !lastMatch
+        };
 
-      if (choice < 0.5) {
-        const alive = Math.floor(newTs * 20) % 16;
-        const rpm = 1800 + Math.floor(Math.sin(newTs) * 300);
-        const crc = (alive ^ (rpm & 0xFF) ^ ((rpm >> 8) & 0xFF) ^ 0x55) & 0xFF;
-        data = [alive, rpm & 0xFF, (rpm >> 8) & 0xFF, Math.floor(rpm / 50), 0x00, 0x02, 0x10, crc];
-      } else if (choice < 0.8) {
-        id = '0x156';
-        decId = 342;
-        name = 'SAS_Steering_Angle';
-        const angle = Math.floor(Math.sin(newTs * 0.5) * 150);
-        data = [angle & 0xFF, (angle >> 8) & 0xFF, 0x24, 0x00, 0x00, 0x00, 0x00, 0x88];
-      } else {
-        id = '0x320';
-        decId = 800;
-        name = 'ABS_Wheel_Speeds';
-        const spd = 34 + Math.floor(Math.cos(newTs * 0.2) * 5);
-        data = [spd, spd, spd, spd, 0x01, 0x00, 0x00, (spd ^ 0xFE) & 0xFF];
+        lastFrameByIdRef.current.set(enhancedFrame.id.toLowerCase(), enhancedFrame);
+        frameCountWindowRef.current.count += 1;
+
+        setFrames(prev => {
+          const next = [...prev, enhancedFrame];
+          return bufferLimit > 0 && next.length > bufferLimit ? next.slice(next.length - bufferLimit) : next;
+        });
+
+        evaluateFrameForTriggersRef.current(enhancedFrame);
+      },
+      (msg) => {
+        showToast(msg);
       }
+    );
 
-      const lastMatch = lastFrameByIdRef.current.get(id.toLowerCase());
-      const changedBytes = data.map((b, i) => !lastMatch || lastMatch.data[i] !== b);
-      const changedBits = data.map((b, i) => lastMatch ? ((lastMatch.data[i] ^ b) & 0xFF) : 0);
+    streamer.start();
 
-      const newFrame: CANFrame = {
-        id,
-        decimalId: decId,
-        name,
-        timestamp: newTs,
-        bus: 0,
-        dlc: data.length,
-        data,
-        ascii: data.map(b => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join(''),
-        count: lastMatch ? lastMatch.count + 1 : 1,
-        direction: 'RX',
-        changedBytes,
-        changedBits,
-        prevData: lastMatch ? lastMatch.data : undefined,
-        isNewId: !lastMatch
-      };
-
-      lastFrameByIdRef.current.set(newFrame.id.toLowerCase(), newFrame);
-      frameCountWindowRef.current.count += 1;
-
-      setFrames(prev => {
-        const next = [...prev, newFrame];
-        return bufferLimit > 0 && next.length > bufferLimit ? next.slice(next.length - bufferLimit) : next;
-      });
-
-      // Evaluate simulated traffic against mapped CAN triggers
-      evaluateFrameForTriggersRef.current(newFrame);
-    }, 500);
-
-    return () => clearInterval(interval);
-  }, [isCapturing, bufferLimit]);
+    return () => {
+      streamer.stop();
+    };
+  }, [isCapturing, bufferLimit, connections]);
 
   // Handle Transmitting Frame with SavvyLens Bit & Byte Change Tracking
   const handleSendCustomFrame = (id: string, data: number[]) => {
