@@ -1,8 +1,17 @@
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import { CANFrame, ConnectionConfig } from '../types';
+
+interface GvretTcpPluginInterface {
+  connect(options: { ip: string; port: number }): Promise<void>;
+  disconnect(): Promise<void>;
+  addListener(eventName: 'onTcpData', listenerFunc: (event: { data: number[] }) => void): Promise<any>;
+}
+
+const GvretTcp = registerPlugin<GvretTcpPluginInterface>('GvretTcp');
 
 export class LiveHardwareStreamer {
   private ws: WebSocket | null = null;
-  private tcpSocket: any = null;
+  private tcpListener: any = null;
   private reconnectTimer: any = null;
   private isRunning = false;
 
@@ -19,18 +28,36 @@ export class LiveHardwareStreamer {
     const ip = this.connection.ipAddress || '192.168.4.1';
     const port = this.connection.tcpPort || 23; // SuperSuave/can-do defaults to port 23 for raw TCP GVRET stream
 
-    // Check if running in Electron and port is 23 (raw TCP stream)
     const isElectron = typeof window !== 'undefined' && (window as any).electronAPI !== undefined;
+    const isNativeAndroid = Capacitor.isNativePlatform();
 
-    if (port === 23 && isElectron) {
+    if (port === 23 && isNativeAndroid) {
+      this.startTcpAndroid(ip, port);
+    } else if (port === 23 && isElectron) {
       this.startTcpElectron(ip, port);
     } else {
       this.startWebSocket(ip, port);
     }
   }
 
+  private async startTcpAndroid(ip: string, port: number) {
+    this.onError(`Connecting via Native Android TCP to CAN-Do device at ${ip}:${port}...`);
+    try {
+      this.tcpListener = await GvretTcp.addListener('onTcpData', (event: { data: number[] }) => {
+        if (event && event.data) {
+          const uint8 = new Uint8Array(event.data);
+          this.parseBinaryData(uint8.buffer);
+        }
+      });
+      await GvretTcp.connect({ ip, port });
+      this.onError(`Connected to Android native TCP socket at ${ip}:${port}`);
+    } catch (e: any) {
+      this.onError(`Android TCP connection error: ${e?.message || e}`);
+    }
+  }
+
   private startTcpElectron(ip: string, port: number) {
-    this.onError(`Connecting via raw TCP to CAN-Do device at ${ip}:${port}...`);
+    this.onError(`Connecting via Electron raw TCP to CAN-Do device at ${ip}:${port}...`);
     try {
       const electronAPI = (window as any).electronAPI;
       if (electronAPI && electronAPI.connectTcp) {
@@ -41,7 +68,6 @@ export class LiveHardwareStreamer {
           this.onError(`TCP connection error: ${err}`);
         });
       } else {
-        // Fallback to WebSocket if bridge not ready
         this.startWebSocket(ip, 81);
       }
     } catch (e) {
@@ -94,7 +120,7 @@ export class LiveHardwareStreamer {
 
       this.ws.onerror = (err) => {
         console.warn('Live hardware WebSocket error:', err);
-        this.onError(`Hardware connection error to ${ip}:${port} (Port 23 is raw TCP; ensure adapter supports WS bridge or use Electron app).`);
+        this.onError(`Hardware connection error to ${ip}:${port}.`);
       };
 
       this.ws.onclose = () => {
@@ -109,7 +135,6 @@ export class LiveHardwareStreamer {
 
   private parseBinaryData(arrayBuffer: ArrayBuffer) {
     const bytes = new Uint8Array(arrayBuffer);
-    // GVRET binary frame parsing logic
     if (bytes.length >= 13) {
       const view = new DataView(arrayBuffer);
       const timestamp = view.getUint32(0, true) / 1000000.0;
@@ -148,9 +173,12 @@ export class LiveHardwareStreamer {
       this.ws.close();
       this.ws = null;
     }
-    if (this.tcpSocket && this.tcpSocket.destroy) {
-      this.tcpSocket.destroy();
-      this.tcpSocket = null;
+    if (this.tcpListener && this.tcpListener.remove) {
+      this.tcpListener.remove();
+      this.tcpListener = null;
     }
+    try {
+      GvretTcp.disconnect();
+    } catch (e) {}
   }
 }
