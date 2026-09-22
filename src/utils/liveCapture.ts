@@ -50,7 +50,8 @@ export class LiveHardwareStreamer {
   }
 
   private startWebSocket(ip: string, port: number) {
-    const wsUrl = `ws://${ip}:${port}`;
+    const targetPort = port === 23 ? 80 : port;
+    const wsUrl = (targetPort === 80 || !targetPort) ? `ws://${ip}/ws` : `ws://${ip}:${targetPort}/ws`;
     this.onError(`Connecting via WebSocket to ${wsUrl}...`);
 
     try {
